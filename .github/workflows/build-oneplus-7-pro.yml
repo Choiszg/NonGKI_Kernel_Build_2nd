@@ -293,6 +293,39 @@ jobs:
             echo "[-] defconfig 解析失败："; tail -20 /tmp/ksucheck.log; exit 1
           fi
 
+
+          # --- KSU 代码的 4.14 非 GKI 兼容层 -----------------------------------------
+          # SukiSU-Ultra 的 susfs_new 分支有三处假定内核 ≥4.17/5.4 的东西，
+          # 4.14 上会直接编译失败（本地扫过整棵 KSU 树，就这三处）：
+          #   1) syscall_fn_t    —— 4.17 才进 include/linux/syscalls.h
+          #      （hook/syscall_hook.h 只在 __x86_64__ 下 typedef，arm64 直接缺类型）
+          #   2) MODULE_IMPORT_NS —— 5.4+；4.14 上会退化成隐式 int 声明
+          #   3) fallthrough     —— 5.4+ 的伪关键字；policy/allowlist.c:499 用到
+          # 用一个强制 -include 的兼容头一次性补齐（比逐个改源文件稳）。
+          cat > drivers/kernelsu/dsh_414_compat.h <<'CMPEOF'
+          #ifndef __DSH_NONGKI_414_COMPAT_H
+          #define __DSH_NONGKI_414_COMPAT_H
+          #include <linux/version.h>
+
+          #if defined(__aarch64__) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+          typedef long (*syscall_fn_t)(const struct pt_regs *regs);
+          #endif
+
+          #ifndef MODULE_IMPORT_NS
+          #define MODULE_IMPORT_NS(ns)
+          #endif
+
+          #ifndef fallthrough
+          #define fallthrough do { } while (0)
+          #endif
+          #endif /* __DSH_NONGKI_414_COMPAT_H */
+          CMPEOF
+          grep -q 'dsh_414_compat.h' drivers/kernelsu/Kbuild \
+            || printf '\nccflags-y += -include $(srctree)/drivers/kernelsu/dsh_414_compat.h\n' >> drivers/kernelsu/Kbuild
+          echo "[+] KSU 兼容层就绪："
+          grep -n 'dsh_414_compat' drivers/kernelsu/Kbuild
+          grep -c . drivers/kernelsu/dsh_414_compat.h
+
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
 
