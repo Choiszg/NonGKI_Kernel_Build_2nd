@@ -10,7 +10,7 @@ env:
   DEVICE_CODENAME : "guacamole"
 
   CUSTOM_CMDS : "CLANG_TRIPLE=aarch64-linux-gnu-"
-  EXTRA_CMDS : "LLVM=1 LLVM_IAS=1"
+  EXTRA_CMDS : "LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-"
 
   # 内核源码：LineageOS 官方 sm8150 的 lineage-21（Android 14）分支
   # 版本 4.14.355-openela —— 与设备现用的 4.14.357-openela-miru 几乎同源
@@ -150,6 +150,20 @@ jobs:
           echo "[+] clang compat fixups applied:"
           grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
           grep -n "TICKET_SHIFT" arch/arm64/include/asm/spinlock.h
+
+          # --- vDSO 汇编目标架构修正 -------------------------------------------
+          # 4.14 的 vdso/Makefile 用 `$(CC) $(a_flags) -c` 汇编 .S，但没有带上
+          # --target（顶层 Makefile 只在 CROSS_COMPILE 非空时注入 CLANG_FLAGS）。
+          # 结果汇编器按宿主 x86_64 解析，cbz/svc/adr 等 AArch64 指令全被判非法。
+          # 这里给该规则显式补上目标三元组（防漏）。
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags)|$(CC) $(a_flags) --target=aarch64-linux-gnu|g' arch/arm64/kernel/vdso/Makefile
+            echo "[+] vdso/Makefile patched:"
+            grep -n "target=aarch64-linux-gnu" arch/arm64/kernel/vdso/Makefile || echo "[-] no a_flags line matched"
+          fi
+          if [ -f arch/arm64/kernel/vdso32/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
+          fi
 
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
