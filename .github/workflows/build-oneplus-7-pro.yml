@@ -36,7 +36,7 @@ env:
   KERNELSU_BRANCH : ""
 
   KERNELSU_AUTO_GET : "true"
-  KERNELSU_AUTO_FORK : "sukisu" # xxksu, rsuntk, next, bakasu and sukisu
+  KERNELSU_AUTO_FORK : "bakasu" # xxksu, rsuntk, next, bakasu and sukisu
 
   SUSFS_ENABLE : true
   SUSFS_FIXED : true
@@ -261,36 +261,49 @@ jobs:
           echo "[+] 各目录现在的 dtb 清单："
           grep -rnE 'dtb-\$\(CONFIG_ARCH_[A-Z0-9_]+\) \+= ' --include=Makefile arch/arm64/boot/dts
 
-          # --- 让 KernelSU / SUSFS 真正编进内核（CONFIG_KSU 需要 KPROBES）-------------
-          # SukiSU-Ultra 的 susfs_new 分支 kernel/Kconfig：
-          #   config KSU
-          #       tristate "KernelSU function support"
-          #       depends on KPROBES && EXT4_FS
-          # lineage_sm8150_defconfig 里没有开 CONFIG_KPROBES（4.14 默认 n），于是
-          # CONFIG_KSU —— 以及依赖它的 CONFIG_KSU_SUSFS —— 在 kconfig 里依赖不成立，
-          # 被整条丢弃：上一轮构建出的镜像里既没有 KernelSU 也没有 SUSFS 就是这原因
-          # （从 Image 里解出的 .config 里连 "CONFIG_KSU is not set" 都没有）。
-          # 这里显式打开 KPROBES（EXT4_FS 本来就是 y），并复述 KSU/SUSFS 开关；
-          # 然后立刻解析一次 defconfig 做预检，确认 CONFIG_KSU 真的落进了 .config。
+          # --- 确认 KernelSU 真能编进内核（依赖不满足会被 kconfig 整条丢掉）-----------
+          # 两代 KSU 的依赖不同：
+          #   SukiSU susfs_new : config KSU depends on KPROBES && EXT4_FS（4.14 默认没开 KPROBES）
+          #   BakaSU / builtin  : config KSU 无依赖（走手动钩子）
+          # 策略：先按树里的 defconfig 原样解析一次；只有 CONFIG_KSU 没出来时，
+          #       才补上 CONFIG_KPROBES=y 再解析一次。两次都不行就直接失败，
+          #       绝不带着"没有 KSU 的内核"去跑完 10 分钟的编译。
           DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
-          sed -i -e '/^CONFIG_KPROBES=/d' -e '/^# CONFIG_KPROBES is not set/d' "$DEFCFG"
-          for c in CONFIG_KPROBES=y CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
+          for c in CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
             grep -qxF "$c" "$DEFCFG" || echo "$c" >> "$DEFCFG"
           done
-          echo "[+] defconfig 尾部："; tail -5 "$DEFCFG"
-          rm -rf /tmp/ksucheck
-          if make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1; then
-            echo "[+] 预检：解析后的 KSU / KPROBES 配置项"
-            grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config || echo "[-] .config 里没有任何 KSU 相关项"
-            if grep -q '^CONFIG_KSU=y' /tmp/ksucheck/.config; then
-              echo "[+] CONFIG_KSU=y 已生效 ✔"
+          ksu_precheck() {
+            rm -rf /tmp/ksucheck
+            make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1 || return 2
+            grep -q '^CONFIG_KSU=y' /tmp/ksucheck/.config
+          }
+          if ksu_precheck; then
+            echo "[+] CONFIG_KSU=y 已生效 ✔（无需 KPROBES）"
+          else
+            echo "[!] CONFIG_KSU 未启用，补 CONFIG_KPROBES=y 后重试"
+            sed -i -e '/^CONFIG_KPROBES=/d' -e '/^# CONFIG_KPROBES is not set/d' "$DEFCFG"
+            echo "CONFIG_KPROBES=y" >> "$DEFCFG"
+            if ksu_precheck; then
+              echo "[+] 补 KPROBES 后 CONFIG_KSU=y 生效 ✔"
             else
-              echo "[-] CONFIG_KSU 仍未启用（Kconfig 依赖不满足）——提前停止，避免白跑一整轮"
+              echo "[-] CONFIG_KSU 仍未启用 —— 提前停止，避免白跑一整轮"
+              tail -20 /tmp/ksucheck.log
               grep -niE 'ksu|kprobe' /tmp/ksucheck/.config | head
               exit 1
             fi
-          else
-            echo "[-] defconfig 解析失败："; tail -20 /tmp/ksucheck.log; exit 1
+          fi
+          echo "[+] 预检结果："; grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config
+
+          # --- BakaSU 的 SUSFS 版本闸门（临时占位）------------------------------------
+          # kernel/tools/susfs_compat.mk 末尾有一句无条件的
+          #   $(error Please wait susfs update.)
+          # 是作者在等 simonpunk 的 SUSFS 补丁跟进时放的临时停牌；同文件上面的两个
+          # grep 已经会按 SUSFS 变体自动加 -DKSU_COMPAT_HAS_SUSFS_*，说明代码本身
+          # 是双路的。这里把这一行去掉，让编译结果说话。
+          SUSFSCOMPAT=drivers/kernelsu/tools/susfs_compat.mk
+          if [ -f "$SUSFSCOMPAT" ]; then
+            sed -i '/Please wait susfs update/d' "$SUSFSCOMPAT"
+            echo "[+] 已移除 SUSFS 版本闸门，文件尾部："; tail -4 "$SUSFSCOMPAT"
           fi
 
 
@@ -302,6 +315,9 @@ jobs:
           #   2) MODULE_IMPORT_NS —— 5.4+；4.14 上会退化成隐式 int 声明
           #   3) fallthrough     —— 5.4+ 的伪关键字；policy/allowlist.c:499 用到
           # 用一个强制 -include 的兼容头一次性补齐（比逐个改源文件稳）。
+          if [ -f drivers/kernelsu/compat/kernel_compat.h ]; then
+            echo "[+] 该 KSU 树自带 compat 层（BakaSU 风格：syscall_fn_t / TWA_* / fallthrough / kernel_read 都已处理），跳过我们的兼容头"
+          else
           cat > drivers/kernelsu/dsh_414_compat.h <<'CMPEOF'
           #ifndef __DSH_NONGKI_414_COMPAT_H
           #define __DSH_NONGKI_414_COMPAT_H
@@ -325,6 +341,7 @@ jobs:
           echo "[+] KSU 兼容层就绪："
           grep -n 'dsh_414_compat' drivers/kernelsu/Kbuild
           grep -c . drivers/kernelsu/dsh_414_compat.h
+          fi
 
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
