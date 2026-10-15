@@ -146,6 +146,13 @@ jobs:
           #endif /* __ASM_STACK_POINTER_H */
           SPEOF
           sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' arch/arm64/include/asm/spinlock.h
+          # trylock 模板里漏了 %w 修饰符：改成 "r" 后 clang 会用 x 寄存器打印 %3，
+          # 于是 `add w0, w0, x9` 混用 W/X 寄存器报错 -> 补上 w 修饰符
+          sed -i -e 's|add\t%w0, %w0, %3|add\t%w0, %w0, %w3|g' \
+                 -e 's|add\t%w1, %w0, %3|add\t%w1, %w0, %w3|g' \
+                 -e 's|sub\t%w1, %w1, %3|sub\t%w1, %w1, %w3|g' \
+                 arch/arm64/include/asm/spinlock.h
+          echo "[+] trylock operands fixed:"; grep -nE '%w3' arch/arm64/include/asm/spinlock.h | head -5
 
           echo "[+] clang compat fixups applied:"
           grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
