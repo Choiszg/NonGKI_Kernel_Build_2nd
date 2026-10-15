@@ -261,6 +261,38 @@ jobs:
           echo "[+] 各目录现在的 dtb 清单："
           grep -rnE 'dtb-\$\(CONFIG_ARCH_[A-Z0-9_]+\) \+= ' --include=Makefile arch/arm64/boot/dts
 
+          # --- 让 KernelSU / SUSFS 真正编进内核（CONFIG_KSU 需要 KPROBES）-------------
+          # SukiSU-Ultra 的 susfs_new 分支 kernel/Kconfig：
+          #   config KSU
+          #       tristate "KernelSU function support"
+          #       depends on KPROBES && EXT4_FS
+          # lineage_sm8150_defconfig 里没有开 CONFIG_KPROBES（4.14 默认 n），于是
+          # CONFIG_KSU —— 以及依赖它的 CONFIG_KSU_SUSFS —— 在 kconfig 里依赖不成立，
+          # 被整条丢弃：上一轮构建出的镜像里既没有 KernelSU 也没有 SUSFS 就是这原因
+          # （从 Image 里解出的 .config 里连 "CONFIG_KSU is not set" 都没有）。
+          # 这里显式打开 KPROBES（EXT4_FS 本来就是 y），并复述 KSU/SUSFS 开关；
+          # 然后立刻解析一次 defconfig 做预检，确认 CONFIG_KSU 真的落进了 .config。
+          DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          sed -i -e '/^CONFIG_KPROBES=/d' -e '/^# CONFIG_KPROBES is not set/d' "$DEFCFG"
+          for c in CONFIG_KPROBES=y CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
+            grep -qxF "$c" "$DEFCFG" || echo "$c" >> "$DEFCFG"
+          done
+          echo "[+] defconfig 尾部："; tail -5 "$DEFCFG"
+          rm -rf /tmp/ksucheck
+          if make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1; then
+            echo "[+] 预检：解析后的 KSU / KPROBES 配置项"
+            grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config || echo "[-] .config 里没有任何 KSU 相关项"
+            if grep -q '^CONFIG_KSU=y' /tmp/ksucheck/.config; then
+              echo "[+] CONFIG_KSU=y 已生效 ✔"
+            else
+              echo "[-] CONFIG_KSU 仍未启用（Kconfig 依赖不满足）——提前停止，避免白跑一整轮"
+              grep -niE 'ksu|kprobe' /tmp/ksucheck/.config | head
+              exit 1
+            fi
+          else
+            echo "[-] defconfig 解析失败："; tail -20 /tmp/ksucheck.log; exit 1
+          fi
+
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
 
