@@ -172,6 +172,22 @@ jobs:
             sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
           fi
 
+          # --- 关掉 DT_OVERLAY（.dtbo 编不过）-----------------------------------
+          # 本树的 dtbs 是默认目标的第一项（arm64/Makefile: all: $(KBUILD_DTBS) ...），
+          # 绕不过去；而 arch/arm64/boot/dts/18821/Makefile 在 DT_OVERLAY=y 时只列
+          # 一个 plugin overlay：sm8150-mtp-overlay.dtbo。该 overlay 在本构建环境里
+          # dtc 报 `pm8150.dtsi:21.1-10 syntax error`（&spmi_bus 引用处）编不过。
+          # 设备侧根本不需要它：dtbo 分区由 ROM 提供，AnyKernel3 只刷 boot。
+          # 关掉后走 else 分支编普通 dtb（sm8150-v2-mtp.dtb），dtbs 即可通过。
+          DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          echo "[+] defconfig: $DEFCFG"
+          grep -n "DT_OVERLAY" "$DEFCFG" || echo "[-] DT_OVERLAY 不在 defconfig 里"
+          sed -i 's/^CONFIG_BUILD_ARM64_DT_OVERLAY=y/# CONFIG_BUILD_ARM64_DT_OVERLAY is not set/' "$DEFCFG"
+          # 双保险：万一日后该 CONFIG 被 select 回来，直接把 dtbo 清单注掉
+          find arch/arm64/boot/dts -name Makefile -print0 \
+            | xargs -0 -r sed -i -E 's|^([[:space:]]*)dtbo-\$\(|\1#dtbo-off: dtbo-\$(|'
+          echo "[+] after patch:"; grep -rn "DT_OVERLAY" "$DEFCFG"; grep -rn "dtbo-off" arch/arm64/boot/dts | head -5
+
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
 
