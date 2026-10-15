@@ -85,7 +85,7 @@ env:
   GENERATE_CHIP: "qcom"
 
   BUILD_DEBUGGER: "true"
-  SKIP_PATCH: "true"
+  SKIP_PATCH: "false"
 
   BUILD_OTHER_CONFIG: "false"
   MERGE_CONFIG_FILES: ""
@@ -121,7 +121,35 @@ jobs:
         run: |
           # Only ${{ env.DEVICE_NAME }} use it.
           cd $GITHUB_WORKSPACE/device_kernel
-          # Nothing
+
+          # --- clang 兼容修正 -------------------------------------------------
+          # lineage-21 树保留 4.14 老写法，其中两处只有 GCC 接受、clang 直接报错：
+          #  (1) stack_pointer.h 用「全局 register 变量 = sp」，clang 不允许全局 sp
+          #      -> 改为语句表达式里的【局部】register（取自 JackA1ltman 的 K20 内核树）
+          #  (2) spinlock.h 用 "I"(1 << TICKET_SHIFT)=65536，超出 I 约束 12 位立即数
+          #      -> 改为寄存器约束 "r"（汇编模板本就是 %5 寄存器形式，语义等价）
+          cat > arch/arm64/include/asm/stack_pointer.h <<'SPEOF'
+          /* SPDX-License-Identifier: GPL-2.0 */
+          #ifndef __ASM_STACK_POINTER_H
+          #define __ASM_STACK_POINTER_H
+
+          /*
+           * how to get the current stack pointer from C
+           */
+          #define current_stack_pointer \
+          ({									\
+          	register unsigned long __current_stack_pointer asm ("sp");	\
+          									\
+          	__current_stack_pointer;					\
+          })
+
+          #endif /* __ASM_STACK_POINTER_H */
+          SPEOF
+          sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' arch/arm64/include/asm/spinlock.h
+
+          echo "[+] clang compat fixups applied:"
+          grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
+          grep -n "TICKET_SHIFT" arch/arm64/include/asm/spinlock.h
 
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
