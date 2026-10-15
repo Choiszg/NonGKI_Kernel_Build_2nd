@@ -150,9 +150,9 @@ runs:
                 KERNELSU_NAME="SukiSU-Ultra"
                 KERNELSU_ORIGIN_BRANCH="main"
                 if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
-                    KERNELSU_BRANCH="builtin"
+                    KERNELSU_BRANCH="susfs_new"
                 else
-                    KERNELSU_BRANCH="builtin"
+                    KERNELSU_BRANCH="susfs_new"
                 fi
 
             elif [[ "${{ env.KERNELSU_AUTO_FORK }}" == "next" ]]; then
@@ -255,7 +255,7 @@ runs:
 
           if [[ "${{ env.KERNELSU_SOURCE }}" == *SukiSU* ]] || [[ "${{ env.KERNELSU_AUTO_FORK }}" == "sukisu" ]]; then
             cp /tmp/Patches/Patch/sukisu_ultra_fixed.patch ./
-            patch -p1 < sukisu_ultra_fixed.patch || echo "[-] some hunks already applied (builtin branch) — tolerated by fork fix"
+            echo "[-] skipped stale sukisu_ultra_fixed.patch (fork uses susfs_new branch; patch targets old builtin)"
 
             echo "[+] SukiSU-Ultra mitigation measures implemented."
 
