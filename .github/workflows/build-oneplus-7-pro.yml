@@ -172,21 +172,23 @@ jobs:
             sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
           fi
 
-          # --- 关掉 DT_OVERLAY（.dtbo 编不过）-----------------------------------
+          # --- .dtbo overlay 编不过 -> 改列它原本的 4 个基础 dtb -------------------
           # 本树的 dtbs 是默认目标的第一项（arm64/Makefile: all: $(KBUILD_DTBS) ...），
-          # 绕不过去；而 arch/arm64/boot/dts/18821/Makefile 在 DT_OVERLAY=y 时只列
-          # 一个 plugin overlay：sm8150-mtp-overlay.dtbo。该 overlay 在本构建环境里
-          # dtc 报 `pm8150.dtsi:21.1-10 syntax error`（&spmi_bus 引用处）编不过。
-          # 设备侧根本不需要它：dtbo 分区由 ROM 提供，AnyKernel3 只刷 boot。
-          # 关掉后走 else 分支编普通 dtb（sm8150-v2-mtp.dtb），dtbs 即可通过。
-          DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
-          echo "[+] defconfig: $DEFCFG"
-          grep -n "DT_OVERLAY" "$DEFCFG" || echo "[-] DT_OVERLAY 不在 defconfig 里"
-          sed -i 's/^CONFIG_BUILD_ARM64_DT_OVERLAY=y/# CONFIG_BUILD_ARM64_DT_OVERLAY is not set/' "$DEFCFG"
-          # 双保险：万一日后该 CONFIG 被 select 回来，直接把 dtbo 清单注掉
-          find arch/arm64/boot/dts -name Makefile -print0 \
-            | xargs -0 -r sed -i -E 's|^([[:space:]]*)dtbo-\$\(|\1#dtbo-off: dtbo-\$(|'
-          echo "[+] after patch:"; grep -rn "DT_OVERLAY" "$DEFCFG"; grep -rn "dtbo-off" arch/arm64/boot/dts | head -5
+          # 绕不开；而 arch/arm64/boot/dts/18821/Makefile 在 DT_OVERLAY=y 时只列一个
+          # plugin overlay：
+          #   dtbo-$(CONFIG_ARCH_SM8150) += sm8150-mtp-overlay.dtbo
+          #   sm8150-mtp-overlay.dtbo-base := sm8150.dtb sm8150-v2.dtb sm8150p.dtb sm8150p-v2.dtb
+          # 该 overlay 在本构建环境里 dtc 报 `pm8150.dtsi:21.1-10 syntax error`（&spmi_bus 处）
+          # 编不过；而它那条 -base 里的 4 个基础 dtb 恰恰是 Image.gz-dtb 要携带的
+          # （设备现用 boot 内嵌的 compatible 就是 qcom,sm8150-mtp / qcom,sm8150p 这组）。
+          # 所以【不动 CONFIG】，只把这一行改成直接列 4 个基础 dtb：既让 dtbs 通过，
+          # Image.gz-dtb 里的 dtb 集也与原来一致。dtbo 分区由 ROM 提供，AK3 只刷 boot。
+          DTSMK=arch/arm64/boot/dts/18821/Makefile
+          sed -i -E 's|^([[:space:]]*)dtbo-\$\(CONFIG_ARCH_SM8150\) \+= sm8150-mtp-overlay\.dtbo|\1dtb-$(CONFIG_ARCH_SM8150) += sm8150.dtb sm8150-v2.dtb sm8150p.dtb sm8150p-v2.dtb|' "$DTSMK"
+          sed -i -E 's|^([[:space:]]*)sm8150-mtp-overlay\.dtbo-base|#dtbo-off: sm8150-mtp-overlay.dtbo-base|' "$DTSMK"
+          echo "[+] $DTSMK after patch:"; cat "$DTSMK"
+          grep -q 'dtb-$(CONFIG_ARCH_SM8150) += sm8150.dtb' "$DTSMK" \
+            || { echo "[-] dtbo->dtb 改写失败（sed 没匹配到）"; exit 1; }
 
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
