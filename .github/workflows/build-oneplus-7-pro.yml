@@ -173,54 +173,88 @@ jobs:
           fi
 
           # --- .dtbo overlay 编不过 -> 换成它原本的基础 dtb --------------------------
-          # 本树的 dtbs 是默认目标的第一项（arm64/Makefile: all: $(KBUILD_DTBS) $(KBUILD_TARGET)），
-          # 绕不开。各 dts 子目录（18821 / 18857 ...）在 DT_OVERLAY=y 时列的是 plugin overlay：
-          #   dtbo-$(CONFIG_ARCH_SM8150) += sm8150-mtp-overlay.dtbo
+          # 本树的 dtbs 是默认目标第一项（arm64/Makefile: all: $(KBUILD_DTBS) $(KBUILD_TARGET)），
+          # 绕不开。各 dts 子目录（18821/18857/18865/19863/19801/qcom ...）在 DT_OVERLAY=y
+          # 时列的都是 plugin overlay：
+          #   dtbo-$(CONFIG_ARCH_SM8150) += \
+          #       sm8150-mtp-overlay.dtbo ...
           #   sm8150-mtp-overlay.dtbo-base := sm8150.dtb sm8150-v2.dtb sm8150p.dtb sm8150p-v2.dtb
-          # 该 overlay 在本构建环境里 dtc 报 `pm8150.dtsi:21.1-10 syntax error`（&spmi_bus 处）
-          # 编不过；而它 -base 里那 4 个基础 dtb 正是 Image.gz-dtb 要携带的
-          # （设备现用 boot 内嵌 compatible 就是 qcom,sm8150-mtp / qcom,sm8150p 这组）。
-          # 所以【不动 CONFIG】，把每条 dtbo 规则就地换成它的 -base 清单（没 base 的直接注掉）：
-          # dtbo 分区由 ROM 提供，AK3 只刷 boot，不需要在树里重建 dtbo。
+          # 这些 overlay 在本构建环境里 dtc 一律报 `pm8150.dtsi:21.1-10 syntax error`
+          # （&spmi_bus 引用处）编不过；而它们 -base 里那 4 个基础 dtb 正是 Image.gz-dtb 要
+          # 携带的（设备现用 boot 内嵌 compatible 就是 qcom,sm8150-mtp / qcom,sm8150p 这组）。
+          # 所以【不动 CONFIG】：把每条 dtbo 语句就地换成它 -base 里的基础 dtb（该目录确实存在
+          # 对应 .dts 才加），其余 dtbo 语句一律注掉。这样 dtbs 能通过，Image.gz-dtb 的 dtb
+          # 集合与原设计一致；dtbo 分区由 ROM 提供，AK3 只刷 boot，不需要在树里重建 dtbo。
           python3 - <<'PYEOF'
-          import glob, re
-          pat_dtbo = re.compile(r'^(\s*)dtbo-\$\(([A-Za-z0-9_]+)\)\s*\+=\s*([A-Za-z0-9_.-]+\.dtbo)\s*$')
-          pat_base = re.compile(r'^\s*([A-Za-z0-9_.-]+\.dtbo)-base\s*:=\s*(.+?)\s*$')
+          import glob, os, re
 
-          changed, missing = [], []
+          pat_base = re.compile(r'^\s*([A-Za-z0-9_.-]+\.dtbo)-base\s*:=\s*(.+?)\s*$')
+          pat_cfg  = re.compile(r'^\s*dtbo-\$\(([A-Za-z0-9_]+)\)\s*\+=\s*(.*)$')
+          pat_any  = re.compile(r'^\s*dtbo-')
+
+          added, dropped, other = [], [], []
           for mk in sorted(glob.glob('arch/arm64/boot/dts/**/Makefile', recursive=True)):
+              d = os.path.dirname(mk)
               src = open(mk).read().splitlines()
               bases = {}
               for ln in src:
                   m = pat_base.match(ln)
                   if m:
                       bases[m.group(1)] = m.group(2)
-              out, hit = [], False
-              for ln in src:
-                  m = pat_dtbo.match(ln)
-                  if m:
+              out, i, hit = [], 0, False
+              while i < len(src):
+                  ln = src[i]
+                  if pat_any.match(ln):
                       hit = True
-                      cfg, obj = m.group(2), m.group(3)
-                      if obj in bases:
-                          out.append('%sdtb-$(%s) += %s' % (m.group(1), cfg, bases[obj]))
-                          changed.append('%s: %s -> dtb += %s' % (mk, obj, bases[obj]))
+                      stmt = [ln]
+                      while stmt[-1].rstrip().endswith('\\') and i + 1 < len(src):
+                          i += 1
+                          stmt.append(src[i])
+                      joined = ' '.join(x.rstrip().rstrip('\\') for x in stmt).strip()
+                      m = pat_cfg.match(joined)
+                      keep = []
+                      if m:
+                          cfg = m.group(1)
+                          for obj in m.group(2).split():
+                              bl = bases.get(obj)
+                              if not bl:
+                                  dropped.append('%s: %s (无 base)' % (mk, obj))
+                                  continue
+                              ok = [b for b in bl.split() if os.path.exists(os.path.join(d, b[:-4] + '.dts'))]
+                              if ok:
+                                  for b in ok:
+                                      if b not in keep:
+                                          keep.append(b)
+                                  if len(ok) != len(bl.split()):
+                                      dropped.append('%s: %s (部分 base 缺 .dts)' % (mk, obj))
+                              else:
+                                  dropped.append('%s: %s (base .dts 不存在)' % (mk, obj))
+                      if m and keep:
+                          out.append('dtb-$(%s) += %s' % (cfg, ' '.join(keep)))
+                          added.append('%s -> dtb-$(%s) += %s' % (mk, cfg, ' '.join(keep)))
                       else:
-                          out.append('%s#dtbo-off(no base list): %s' % (m.group(1), ln.strip()))
-                          missing.append('%s: %s' % (mk, ln.strip()))
+                          out.append('#dtbo-off: ' + joined)
+                          other.append('%s: %s' % (mk, joined[:90]))
+                      i += 1
                       continue
                   if pat_base.match(ln):
                       out.append('#dtbo-off: ' + ln.strip())
+                      i += 1
                       continue
                   out.append(ln)
+                  i += 1
               if hit:
                   open(mk, 'w').write('\n'.join(out) + '\n')
-          print('[+] rewritten %d overlay rule(s):' % len(changed))
-          for c in changed:
-              print('    ' + c)
-          for m in missing:
-              print('    [!] 无 base 清单，已注掉: ' + m)
+
+          print('[+] 加了基础 dtb (%d 处):' % len(added))
+          for a in added:
+              print('    ' + a)
+          print('[+] 注掉的 dtbo 语句 (%d 处，未逐条列出)' % len(other))
+          print('[+] 丢弃的 overlay 对象 (%d 个，前 5 条):' % len(dropped))
+          for a in dropped[:5]:
+              print('    ' + a)
           PYEOF
-          echo "[+] 检查是否还有未处理的 dtbo 目标（应为空）："
+          echo "[+] 校验：是否还有未处理的 dtbo 目标（应为空）"
           if grep -rnE '^[[:space:]]*dtbo-' --include=Makefile arch/arm64/boot/dts; then
             echo "[-] 仍有未处理的 dtbo 目标"; exit 1
           fi
