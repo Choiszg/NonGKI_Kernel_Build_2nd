@@ -139,6 +139,9 @@ jobs:
                   m = re.match(r'^([ \t]*)source[ \t]+"?([^"\s#]+)"?[ \t]*$', L)
                   if m:
                       tgt = m.group(2)
+                      # 关键：带 $ 变量（如 arch/$SRCARCH/Kconfig）或绝对路径的，交给 kconfig 解析，绝不能碰
+                      if '$' in tgt or tgt.startswith('/'):
+                          out.append(L); continue
                       cands = [tgt, os.path.join(os.path.dirname(kf), tgt)]
                       if not any(os.path.exists(c) for c in cands):
                           out.append(f'{m.group(1)}# [dsh] source {tgt}  (路径不存在，已注释)')
