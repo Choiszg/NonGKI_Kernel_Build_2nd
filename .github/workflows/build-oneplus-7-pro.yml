@@ -123,6 +123,34 @@ jobs:
           # Only ${{ env.DEVICE_NAME }} use it.
           cd $GITHUB_WORKSPACE/device_kernel
 
+          # --- Kconfig 悬空 source 清理（OPLUS 树专有坑）----------------------
+          # OnePlus 的 Kconfig 用自家预处理语法：#ifdef OPLUS_FEATURE_xxx ... source ... #endif
+          # 必须在 OPLUS 构建系统里先做特性预处理；裸源码直接 make 会去找不存在的目录，例如
+          #   block/Kconfig: source block/oplus_foreground_io_opt/Kconfig
+          # 这里做通用处理：凡是 source 指向的路径不存在，就注释掉该行。
+          python3 - <<'KCLEAN'
+          import os, glob, re
+          fixed = 0
+          for kf in glob.glob('**/Kconfig', recursive=True) + glob.glob('**/Kconfig.*', recursive=True):
+              try: lines = open(kf, errors='replace').read().split('\n')
+              except Exception: continue
+              out = []; changed = False
+              for L in lines:
+                  m = re.match(r'^([ \t]*)source[ \t]+"?([^"\s#]+)"?[ \t]*$', L)
+                  if m:
+                      tgt = m.group(2)
+                      cands = [tgt, os.path.join(os.path.dirname(kf), tgt)]
+                      if not any(os.path.exists(c) for c in cands):
+                          out.append(f'{m.group(1)}# [dsh] source {tgt}  (路径不存在，已注释)')
+                          changed = True; fixed += 1
+                          continue
+                  out.append(L)
+              if changed:
+                  open(kf, 'w').write('\n'.join(out))
+                  print(f'[+] Kconfig 清理: {kf}')
+          print(f'[+] 共注释掉 {fixed} 条悬空 source')
+          KCLEAN
+
           # --- clang 兼容修正 -------------------------------------------------
           # lineage-21 树保留 4.14 老写法，其中两处只有 GCC 接受、clang 直接报错：
           #  (1) stack_pointer.h 用「全局 register 变量 = sp」，clang 不允许全局 sp
