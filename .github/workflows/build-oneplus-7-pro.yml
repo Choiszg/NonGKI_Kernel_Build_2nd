@@ -57,7 +57,7 @@ env:
   PYTHON_VERSION: "3"
 
   PACK_METHOD: "AnyKernel3"
-  PACK_KMODULES: "false"
+  PACK_KMODULES: "true"
 
   KERNELSU_METHOD: "shell"
 
@@ -364,6 +364,13 @@ jobs:
 
       - name: 🚀 Build Process
         uses: ./.github/workflows/build-process
+      - name: 📦 Upload Kernel Modules
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-modules-4.14
+          path: device_kernel/out/**/*.ko
 
       - name: ❗ Keep ROM dtb/dtbo
         run: |
