@@ -6333,3 +6333,7 @@ CONFIG_SG_POOL=y
 CONFIG_ARCH_HAS_SG_CHAIN=y
 CONFIG_SBITMAP=y
 # CONFIG_STRING_SELFTEST is not set
+
+# === 由 DSH 添加：WLAN (qcacld-3.0) DLKM，profile 取自设备现用 qca_cld3_wlan.ko ===
+CONFIG_QCA_CLD_WLAN=m
+CONFIG_QCA_CLD_WLAN_PROFILE="genoa.snoc.perf"
