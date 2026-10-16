@@ -301,6 +301,17 @@ jobs:
           for c in CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
             grep -qxF "$c" "$DEFCFG" || echo "$c" >> "$DEFCFG"
           done
+
+          # --- [诊断] KernelSU 注入链路 -----------------------------------------
+          echo "=== [诊断] kernelsu 注入状态 ==="
+          echo "-- drivers/kernelsu 链接:"; ls -ld drivers/kernelsu 2>&1 | head -2
+          echo "-- Kconfig 是否可读:"; test -f drivers/kernelsu/Kconfig && echo "   OK ($(wc -l < drivers/kernelsu/Kconfig) 行)" || echo "   ❌ 打不开"
+          echo "-- drivers/Kconfig 里的 kernelsu 源:"; grep -n 'kernelsu' drivers/Kconfig || echo "   ❌ 没有"
+          echo "-- drivers/Makefile 里的 kernelsu:"; grep -n 'kernelsu' drivers/Makefile || echo "   ❌ 没有"
+          echo "-- KSU Kconfig 里的 config KSU:"; grep -nE '^config KSU$' -A3 drivers/kernelsu/Kconfig 2>/dev/null || echo "   ❌ 没有"
+          echo "-- defconfig 里的相关行:"; grep -nE '^CONFIG_(KSU|KALLSYMS|KPROBES|MODULES)|^# CONFIG_(KSU|KPROBES)' "$DEFCFG" || echo "   ❌ 无"
+          echo "-- 树里 KPROBES/KALLSYMS 定义处:"; grep -rn '^config KPROBES' init/Kconfig kernel/Kconfig 2>/dev/null | head -3 || true
+
           ksu_precheck() {
             rm -rf /tmp/ksucheck
             make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1 || return 2
@@ -315,12 +326,17 @@ jobs:
             if ksu_precheck; then
               echo "[+] 补 KPROBES 后 CONFIG_KSU=y 生效 ✔"
             else
-              echo "[!] CONFIG_KSU 预检未通过（OPLUS 树首轮先继续，看真实构建结果）"
-              tail -20 /tmp/ksucheck.log
-              grep -niE 'ksu|kprobe' /tmp/ksucheck/.config | head || true
+              echo "=== [诊断] 解析结果里与 KSU/KPROBES/KALLSYMS 相关的行 ==="
+              grep -nE 'KSU|KPROBES|KALLSYMS' /tmp/ksucheck/.config | head -20 || echo "   ❌ .config 里完全没有这些符号"
+              echo "=== [诊断] defconfig 解析日志里的告警（unknown/invalid/warning）==="
+              grep -inE 'unknown|invalid|warning|error' /tmp/ksucheck.log | head -15 || echo "   （无）"
+              echo "=== [诊断] .config 里 KALLSYMS/MODULES/THREAD_INFO ==="
+              grep -nE '^CONFIG_(KALLSYMS|MODULES|THREAD_INFO_IN_TASK)|^# CONFIG_(KALLSYMS|MODULES|THREAD_INFO_IN_TASK)' /tmp/ksucheck/.config | head -10 || true
+              echo "[-] 硬失败：没有 KernelSU 的内核对本任务毫无意义（省下一小时编译）"
+              exit 1
             fi
           fi
-          echo "[+] 预检结果："; grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config
+          echo "[+] 预检通过（见上方诊断）"
 
           # --- BakaSU 的 SUSFS 版本闸门（临时占位）------------------------------------
           # kernel/tools/susfs_compat.mk 末尾有一句无条件的
