@@ -364,13 +364,18 @@ jobs:
 
       - name: 🚀 Build Process
         uses: ./.github/workflows/build-process
-      - name: 📦 Upload Kernel Modules
+      - name: 📦 Upload Kernel Modules & Build Info
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-modules-4.14
-          path: device_kernel/out/**/*.ko
+          name: kernel-build-info
+          path: |
+            device_kernel/out/**/*.ko
+            device_kernel/out/Module.symvers
+            device_kernel/out/.config
+            device_kernel/out/System.map
+          if-no-files-found: warn
 
       - name: ❗ Keep ROM dtb/dtbo
         run: |
