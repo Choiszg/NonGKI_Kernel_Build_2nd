@@ -326,6 +326,10 @@ jobs:
             if ksu_precheck; then
               echo "[+] 补 KPROBES 后 CONFIG_KSU=y 生效 ✔"
             else
+              echo "=== [诊断] /tmp/ksucheck 目录内容 ==="; ls -la /tmp/ksucheck 2>&1 | head -12 || true
+              echo "=== [诊断] make 日志最后 40 行 ==="; tail -40 /tmp/ksucheck.log 2>&1 || true
+              echo "=== [诊断] make 日志里的错误行 ==="; grep -nE "error|Error|\*\*\*|warning: " /tmp/ksucheck.log 2>&1 | head -20 || true
+              echo "=== [诊断] .config 是否存在 ==="; ls -l /tmp/ksucheck/.config 2>&1 || true
               echo "=== [诊断] 解析结果里与 KSU/KPROBES/KALLSYMS 相关的行 ==="
               grep -nE 'KSU|KPROBES|KALLSYMS' /tmp/ksucheck/.config | head -20 || echo "   ❌ .config 里完全没有这些符号"
               echo "=== [诊断] defconfig 解析日志里的告警（unknown/invalid/warning）==="
