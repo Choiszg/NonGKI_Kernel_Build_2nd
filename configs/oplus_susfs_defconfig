@@ -753,3 +753,6 @@ CONFIG_RMNET_SHS=y
 # === DSH: 用 LOS 树自带配置为基（已知能启动本机硬件），此处只做最小改动 ===
 CONFIG_LOCALVERSION="-dsh-susfs-perf"
 # WiFi：LOS 自带已是 =m（default profile，树内自洽），不用改
+# === DSH: 关闭强制模块签名（LOS 默认 FORCE=y，而我们/厂商的模块都未签名）===
+# CONFIG_MODULE_SIG_FORCE is not set
+CONFIG_MODULE_SIG_ALL=y
