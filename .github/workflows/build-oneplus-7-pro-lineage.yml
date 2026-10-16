@@ -262,6 +262,26 @@ jobs:
           echo "[+] 各目录现在的 dtb 清单："
           grep -rnE 'dtb-\$\(CONFIG_ARCH_[A-Z0-9_]+\) \+= ' --include=Makefile arch/arm64/boot/dts
 
+          # --- WLAN: LOS 树 qcacld 的 IBSS 调用漏传第 8 个参数（补 ch_freq_hint=0）---
+          python3 - <<'WLANFIX'
+          import re, os, sys
+          p = 'drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c'
+          if not os.path.exists(p):
+              print('[!] 没有 qcacld 源码，跳过 WLAN 修正')
+          else:
+              s = open(p, errors='replace').read()
+              if 'chandef.width, 0)' in s:
+                  print('[+] WLAN: 修正已存在')
+              else:
+                  pat = re.compile(r'(wlan_hdd_cfg80211_connect_start\(adapter,\s*params->ssid,.*?params->chandef\.width)\s*\);', re.S)
+                  m = pat.search(s)
+                  if m:
+                      open(p, 'w').write(s[:m.start()] + m.group(1) + ', 0);' + s[m.end():])
+                      print('[+] WLAN: join_ibss 调用已补 ch_freq_hint=0')
+                  else:
+                      print('[!] WLAN: 未命中目标（结构可能不同）')
+          WLANFIX
+
           # --- 确认 KernelSU 真能编进内核（依赖不满足会被 kconfig 整条丢掉）-----------
           # 两代 KSU 的依赖不同：
           #   SukiSU susfs_new : config KSU depends on KPROBES && EXT4_FS（4.14 默认没开 KPROBES）
