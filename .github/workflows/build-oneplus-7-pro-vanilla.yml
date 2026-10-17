@@ -1,0 +1,410 @@
+name: Build OnePlus 7 Pro (LOS-21) VANILLA control
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  # Device env
+  DEVICE_NAME : "oneplus_7_pro"
+  DEVICE_CODENAME : "guacamole"
+
+  CUSTOM_CMDS : "CLANG_TRIPLE=aarch64-linux-gnu-"
+  EXTRA_CMDS : "BRAND_SHOW_FLAG=oneplus NM=llvm-nm OBJDUMP=llvm-objdump STRIP=llvm-strip"
+
+  # 内核源码：LineageOS lineage-21 —— 与设备现用 4.14.357-openela-miru 同源(EXTRAVERSION=-openela)
+  # 内核源码：LineageOS lineage-21 —— 与设备现用 4.14.357-openela-miru 同源(EXTRAVERSION=-openela)
+  # 这样编出的内核符号 CRC 才可能与设备现有 36 个厂商 .ko 对齐
+  KERNEL_SOURCE : "https://github.com/LineageOS/android_kernel_oneplus_sm8150.git"
+  KERNEL_BRANCH : "lineage-21"
+
+  # Neutron 工具链（与 JackA1ltman 的 K20（同 SM8150）用的一致）
+  CLANG_SOURCE : "https://github.com/ZyCromerZ/Clang/releases/download/10.0.1-20220724-release/Clang-10.0.1-20220724.tar.gz"
+  CLANG_BRANCH : ""
+
+  GCC_GNU : false
+  GCC_64_SOURCE : "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git"
+  GCC_64_BRANCH : "android12L-release"
+  GCC_32_SOURCE : "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git"
+  GCC_32_BRANCH : "android12L-release"
+
+  DEFCONFIG_SOURCE: "https://raw.githubusercontent.com/Choiszg/NonGKI_Kernel_Build_2nd/mainline/configs/oplus_susfs_defconfig"
+  DEFCONFIG_NAME : "oplus_susfs_defconfig"
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
+
+  KERNELSU_SOURCE : ""
+  KERNELSU_BRANCH : ""
+
+  KERNELSU_AUTO_GET : "false"
+  KERNELSU_AUTO_FORK : "bakasu" # xxksu, rsuntk, next, bakasu and sukisu
+
+  SUSFS_ENABLE : false
+  SUSFS_FIXED : false
+
+  # 用 ebears 那份 OnePlus 7 专用的 AnyKernel3（设备分区/fstab 已适配）
+  AK3_SOURCE : "https://github.com/ebears/AnyKernel3.git"
+  AK3_BRANCH : "oneplus7"
+
+  BOOT_SOURCE : ""
+
+  NEED_DTBO : false
+  NEED_SAFE_DTBO : false
+
+  ROM_TEXT : "cos14"
+
+  # Other env
+  PYTHON_VERSION: "3"
+
+  PACK_METHOD: "AnyKernel3"
+  PACK_KMODULES: "true"
+
+  KERNELSU_METHOD: "shell"
+
+  # op_kernel = OnePlus 内核专用补丁分支（含 4.14 的 SUSFS 实现与 hook 脚本）
+  PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
+  PATCHES_BRANCH: "op_kernel"
+
+  SUSFS_FOLDER_FIXED: ""
+  SUSFS_PATCH_FIXED: ""
+
+  REKERNEL_ENABLE: "false"
+  DROIDSPACES_ENABLE: "false"
+  NOMOUNT_ENABLE: "false"
+
+  HOOK_METHOD: "syscall"
+
+  KPM_ENABLE: "false"
+  KPM_INLINE: "false"
+  KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux"
+
+  BASEBAND_GUARD_ENABLE: "false"
+  BASEBAND_GUARD_BOOT: "false"
+
+  GENERATE_DTB: "false"
+  GENERATE_CHIP: "qcom"
+
+  BUILD_DEBUGGER: "true"
+  SKIP_PATCH: "true"
+
+  BUILD_OTHER_CONFIG: "false"
+  MERGE_CONFIG_FILES: ""
+
+  FREE_MORE_SPACE: "false"
+
+jobs:
+  build-kernel:
+    name: OnePlus 7 Pro (LOS-21) VANILLA control
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: ⏰ Checkout repository
+        uses: actions/checkout@v6
+
+      - name: ⌛️ Compilation environment preparation
+        uses: ./.github/workflows/build-env
+
+      - name: ⚙️ Get necessary tools
+        uses: ./.github/workflows/build-ready
+
+      - name: 🪝 Patch Kernel of SUSFS
+        uses: ./.github/workflows/patch-susfs
+
+      - name: 🔗 Patch for no-kprobe
+        uses: ./.github/workflows/patch-no-kprobe
+
+      - name: 🪛 Extra Kernel Options
+        run: |
+          # Only ${{ env.DEVICE_NAME }} use it.
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # --- clang 兼容修正 -------------------------------------------------
+          # lineage-21 树保留 4.14 老写法，其中两处只有 GCC 接受、clang 直接报错：
+          #  (1) stack_pointer.h 用「全局 register 变量 = sp」，clang 不允许全局 sp
+          #      -> 改为语句表达式里的【局部】register（取自 JackA1ltman 的 K20 内核树）
+          #  (2) spinlock.h 用 "I"(1 << TICKET_SHIFT)=65536，超出 I 约束 12 位立即数
+          #      -> 改为寄存器约束 "r"（汇编模板本就是 %5 寄存器形式，语义等价）
+          cat > arch/arm64/include/asm/stack_pointer.h <<'SPEOF'
+          /* SPDX-License-Identifier: GPL-2.0 */
+          #ifndef __ASM_STACK_POINTER_H
+          #define __ASM_STACK_POINTER_H
+
+          /*
+           * how to get the current stack pointer from C
+           */
+          #define current_stack_pointer \
+          ({									\
+          	register unsigned long __current_stack_pointer asm ("sp");	\
+          									\
+          	__current_stack_pointer;					\
+          })
+
+          #endif /* __ASM_STACK_POINTER_H */
+          SPEOF
+          sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' arch/arm64/include/asm/spinlock.h
+          # trylock 模板里漏了 %w 修饰符：改成 "r" 后 clang 会用 x 寄存器打印 %3，
+          # 于是 `add w0, w0, x9` 混用 W/X 寄存器报错 -> 补上 w 修饰符
+          sed -i -e 's|add\t%w0, %w0, %3|add\t%w0, %w0, %w3|g' \
+                 -e 's|add\t%w1, %w0, %3|add\t%w1, %w0, %w3|g' \
+                 -e 's|sub\t%w1, %w1, %3|sub\t%w1, %w1, %w3|g' \
+                 arch/arm64/include/asm/spinlock.h
+          echo "[+] trylock operands fixed:"; grep -nE '%w3' arch/arm64/include/asm/spinlock.h | head -5
+
+          echo "[+] clang compat fixups applied:"
+          grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
+          grep -n "TICKET_SHIFT" arch/arm64/include/asm/spinlock.h
+
+          # --- vDSO 汇编目标架构修正 -------------------------------------------
+          # 4.14 的 vdso/Makefile 用 `$(CC) $(a_flags) -c` 汇编 .S，但没有带上
+          # --target（顶层 Makefile 只在 CROSS_COMPILE 非空时注入 CLANG_FLAGS）。
+          # 结果汇编器按宿主 x86_64 解析，cbz/svc/adr 等 AArch64 指令全被判非法。
+          # 这里给该规则显式补上目标三元组（防漏）。
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags)|$(CC) $(a_flags) --target=aarch64-linux-gnu|g' arch/arm64/kernel/vdso/Makefile
+            echo "[+] vdso/Makefile patched:"
+            grep -n "target=aarch64-linux-gnu" arch/arm64/kernel/vdso/Makefile || echo "[-] no a_flags line matched"
+          fi
+          if [ -f arch/arm64/kernel/vdso32/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
+          fi
+
+          # --- .dtbo overlay 编不过 -> 换成它原本的基础 dtb --------------------------
+          # 本树的 dtbs 是默认目标第一项（arm64/Makefile: all: $(KBUILD_DTBS) $(KBUILD_TARGET)），
+          # 绕不开。各 dts 子目录（18821/18857/18865/19863/19801/qcom ...）在 DT_OVERLAY=y
+          # 时列的都是 plugin overlay：
+          #   dtbo-$(CONFIG_ARCH_SM8150) += \
+          #       sm8150-mtp-overlay.dtbo ...
+          #   sm8150-mtp-overlay.dtbo-base := sm8150.dtb sm8150-v2.dtb sm8150p.dtb sm8150p-v2.dtb
+          # 这些 overlay 在本构建环境里 dtc 一律报 `pm8150.dtsi:21.1-10 syntax error`
+          # （&spmi_bus 引用处）编不过；而它们 -base 里那 4 个基础 dtb 正是 Image.gz-dtb 要
+          # 携带的（设备现用 boot 内嵌 compatible 就是 qcom,sm8150-mtp / qcom,sm8150p 这组）。
+          # 所以【不动 CONFIG】：把每条 dtbo 语句就地换成它 -base 里的基础 dtb（该目录确实存在
+          # 对应 .dts 才加），其余 dtbo 语句一律注掉。这样 dtbs 能通过，Image.gz-dtb 的 dtb
+          # 集合与原设计一致；dtbo 分区由 ROM 提供，AK3 只刷 boot，不需要在树里重建 dtbo。
+          python3 - <<'PYEOF'
+          import glob, os, re
+
+          pat_base = re.compile(r'^\s*([A-Za-z0-9_.-]+\.dtbo)-base\s*:=\s*(.+?)\s*$')
+          pat_cfg  = re.compile(r'^\s*dtbo-\$\(([A-Za-z0-9_]+)\)\s*\+=\s*(.*)$')
+          pat_any  = re.compile(r'^\s*dtbo-')
+
+          added, dropped, other = [], [], []
+          for mk in sorted(glob.glob('arch/arm64/boot/dts/**/Makefile', recursive=True)):
+              d = os.path.dirname(mk)
+              src = open(mk).read().splitlines()
+              bases = {}
+              for ln in src:
+                  m = pat_base.match(ln)
+                  if m:
+                      bases[m.group(1)] = m.group(2)
+              out, i, hit = [], 0, False
+              while i < len(src):
+                  ln = src[i]
+                  if pat_any.match(ln):
+                      hit = True
+                      stmt = [ln]
+                      while stmt[-1].rstrip().endswith('\\') and i + 1 < len(src):
+                          i += 1
+                          stmt.append(src[i])
+                      joined = ' '.join(x.rstrip().rstrip('\\') for x in stmt).strip()
+                      m = pat_cfg.match(joined)
+                      keep = []
+                      if m:
+                          cfg = m.group(1)
+                          for obj in m.group(2).split():
+                              bl = bases.get(obj)
+                              if not bl:
+                                  dropped.append('%s: %s (无 base)' % (mk, obj))
+                                  continue
+                              ok = [b for b in bl.split() if os.path.exists(os.path.join(d, b[:-4] + '.dts'))]
+                              if ok:
+                                  for b in ok:
+                                      if b not in keep:
+                                          keep.append(b)
+                                  if len(ok) != len(bl.split()):
+                                      dropped.append('%s: %s (部分 base 缺 .dts)' % (mk, obj))
+                              else:
+                                  dropped.append('%s: %s (base .dts 不存在)' % (mk, obj))
+                      if m and keep:
+                          out.append('dtb-$(%s) += %s' % (cfg, ' '.join(keep)))
+                          added.append('%s -> dtb-$(%s) += %s' % (mk, cfg, ' '.join(keep)))
+                      else:
+                          out.append('#dtbo-off: ' + joined)
+                          other.append('%s: %s' % (mk, joined[:90]))
+                      i += 1
+                      continue
+                  if pat_base.match(ln):
+                      out.append('#dtbo-off: ' + ln.strip())
+                      i += 1
+                      continue
+                  out.append(ln)
+                  i += 1
+              if hit:
+                  open(mk, 'w').write('\n'.join(out) + '\n')
+
+          print('[+] 加了基础 dtb (%d 处):' % len(added))
+          for a in added:
+              print('    ' + a)
+          print('[+] 注掉的 dtbo 语句 (%d 处，未逐条列出)' % len(other))
+          print('[+] 丢弃的 overlay 对象 (%d 个，前 5 条):' % len(dropped))
+          for a in dropped[:5]:
+              print('    ' + a)
+          PYEOF
+          echo "[+] 校验：是否还有未处理的 dtbo 目标（应为空）"
+          if grep -rnE '^[[:space:]]*dtbo-' --include=Makefile arch/arm64/boot/dts; then
+            echo "[-] 仍有未处理的 dtbo 目标"; exit 1
+          fi
+          echo "[+] 各目录现在的 dtb 清单："
+          grep -rnE 'dtb-\$\(CONFIG_ARCH_[A-Z0-9_]+\) \+= ' --include=Makefile arch/arm64/boot/dts
+
+          # --- WLAN: LOS 树 qcacld 的 IBSS 调用漏传第 8 个参数（补 ch_freq_hint=0）---
+          python3 - <<'WLANFIX'
+          import re, os, sys
+          p = 'drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c'
+          if not os.path.exists(p):
+              print('[!] 没有 qcacld 源码，跳过 WLAN 修正')
+          else:
+              s = open(p, errors='replace').read()
+              if 'chandef.width, 0)' in s:
+                  print('[+] WLAN: 修正已存在')
+              else:
+                  pat = re.compile(r'(wlan_hdd_cfg80211_connect_start\(adapter,\s*params->ssid,.*?params->chandef\.width)\s*\);', re.S)
+                  m = pat.search(s)
+                  if m:
+                      open(p, 'w').write(s[:m.start()] + m.group(1) + ', 0);' + s[m.end():])
+                      print('[+] WLAN: join_ibss 调用已补 ch_freq_hint=0')
+                  else:
+                      print('[!] WLAN: 未命中目标（结构可能不同）')
+          WLANFIX
+
+          # --- 确认 KernelSU 真能编进内核（依赖不满足会被 kconfig 整条丢掉）-----------
+          # 两代 KSU 的依赖不同：
+          #   SukiSU susfs_new : config KSU depends on KPROBES && EXT4_FS（4.14 默认没开 KPROBES）
+          #   BakaSU / builtin  : config KSU 无依赖（走手动钩子）
+          # 策略：先按树里的 defconfig 原样解析一次；只有 CONFIG_KSU 没出来时，
+          #       才补上 CONFIG_KPROBES=y 再解析一次。两次都不行就直接失败，
+          #       绝不带着"没有 KSU 的内核"去跑完 10 分钟的编译。
+          DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          for c in CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
+            grep -qxF "$c" "$DEFCFG" || echo "$c" >> "$DEFCFG"
+          done
+          ksu_precheck() {
+            rm -rf /tmp/ksucheck
+            make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1 || return 2
+            grep -q '^CONFIG_KSU=y' /tmp/ksucheck/.config
+          }
+          if ksu_precheck; then
+            echo "[+] CONFIG_KSU=y 已生效 ✔（无需 KPROBES）"
+          else
+            echo "[!] CONFIG_KSU 未启用，补 CONFIG_KPROBES=y 后重试"
+            sed -i -e '/^CONFIG_KPROBES=/d' -e '/^# CONFIG_KPROBES is not set/d' "$DEFCFG"
+            echo "CONFIG_KPROBES=y" >> "$DEFCFG"
+            if ksu_precheck; then
+              echo "[+] 补 KPROBES 后 CONFIG_KSU=y 生效 ✔"
+            else
+              echo "[!] CONFIG_KSU 预检未通过（OPLUS 树首轮先继续，看真实构建结果）"
+              tail -20 /tmp/ksucheck.log
+              grep -niE 'ksu|kprobe' /tmp/ksucheck/.config | head || true
+            fi
+          fi
+          echo "[+] 预检结果（纯净版可能没有 KSU，不失败）:"; grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config || echo "  （无 KSU，符合纯净版预期）"
+
+          # --- BakaSU 的 SUSFS 版本闸门（临时占位）------------------------------------
+          # kernel/tools/susfs_compat.mk 末尾有一句无条件的
+          #   $(error Please wait susfs update.)
+          # 是作者在等 simonpunk 的 SUSFS 补丁跟进时放的临时停牌；同文件上面的两个
+          # grep 已经会按 SUSFS 变体自动加 -DKSU_COMPAT_HAS_SUSFS_*，说明代码本身
+          # 是双路的。这里把这一行去掉，让编译结果说话。
+          SUSFSCOMPAT=drivers/kernelsu/tools/susfs_compat.mk
+          if [ -f "$SUSFSCOMPAT" ]; then
+            sed -i '/Please wait susfs update/d' "$SUSFSCOMPAT"
+            echo "[+] 已移除 SUSFS 版本闸门，文件尾部："; tail -4 "$SUSFSCOMPAT"
+          fi
+
+
+          # --- KSU 代码的 4.14 非 GKI 兼容层 -----------------------------------------
+          # SukiSU-Ultra 的 susfs_new 分支有三处假定内核 ≥4.17/5.4 的东西，
+          # 4.14 上会直接编译失败（本地扫过整棵 KSU 树，就这三处）：
+          #   1) syscall_fn_t    —— 4.17 才进 include/linux/syscalls.h
+          #      （hook/syscall_hook.h 只在 __x86_64__ 下 typedef，arm64 直接缺类型）
+          #   2) MODULE_IMPORT_NS —— 5.4+；4.14 上会退化成隐式 int 声明
+          #   3) fallthrough     —— 5.4+ 的伪关键字；policy/allowlist.c:499 用到
+          # 用一个强制 -include 的兼容头一次性补齐（比逐个改源文件稳）。
+          if [ -f drivers/kernelsu/compat/kernel_compat.h ]; then
+            echo "[+] 该 KSU 树自带 compat 层（BakaSU 风格：syscall_fn_t / TWA_* / fallthrough / kernel_read 都已处理），跳过我们的兼容头"
+          else
+          cat > drivers/kernelsu/dsh_414_compat.h <<'CMPEOF'
+          #ifndef __DSH_NONGKI_414_COMPAT_H
+          #define __DSH_NONGKI_414_COMPAT_H
+          #include <linux/version.h>
+
+          #if defined(__aarch64__) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+          typedef long (*syscall_fn_t)(const struct pt_regs *regs);
+          #endif
+
+          #ifndef MODULE_IMPORT_NS
+          #define MODULE_IMPORT_NS(ns)
+          #endif
+
+          #ifndef fallthrough
+          #define fallthrough do { } while (0)
+          #endif
+          #endif /* __DSH_NONGKI_414_COMPAT_H */
+          CMPEOF
+          grep -q 'dsh_414_compat.h' drivers/kernelsu/Kbuild \
+            || printf '\nccflags-y += -include $(srctree)/drivers/kernelsu/dsh_414_compat.h\n' >> drivers/kernelsu/Kbuild
+          echo "[+] KSU 兼容层就绪："
+          grep -n 'dsh_414_compat' drivers/kernelsu/Kbuild
+          grep -c . drivers/kernelsu/dsh_414_compat.h
+          fi
+
+          # --- OPLUS 树环境修补（官方树需要 BRAND_SHOW_FLAG）---
+          if [ -f OplusKernelEnvConfig.mk ]; then
+            grep -q 'export BRAND_SHOW_FLAG=oneplus' OplusKernelEnvConfig.mk \
+              || sed -i '/-include oplus_native_features.mk/i\export BRAND_SHOW_FLAG=oneplus' OplusKernelEnvConfig.mk
+            echo "[+] OplusKernelEnvConfig.mk 已处理"
+          fi
+
+      - name: 🧰 Patch Kernel of Re:Kernel
+        uses: ./.github/workflows/patch-rekernel
+
+      - name: 💿 Patch Kernel of Droidspaces
+        uses: ./.github/workflows/patch-droidspaces
+
+      - name: 🔒 Patch Kernel of Baseband Guard
+        uses: ./.github/workflows/patch-baseband-guard
+
+      - name: 🛡️ Patch Kernel of NoMount
+        uses: ./.github/workflows/patch-nomount
+
+      - name: 🚀 Build Process
+        uses: ./.github/workflows/build-process
+      - name: 📦 Upload Kernel Modules & Build Info
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-build-info
+          path: |
+            device_kernel/out/**/*.ko
+            device_kernel/out/Module.symvers
+            device_kernel/out/.config
+            device_kernel/out/System.map
+          if-no-files-found: warn
+
+      - name: ❗ Keep ROM dtb/dtbo
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          rm -f out/arch/arm64/boot/dtbo.img out/arch/arm64/boot/dtb
+          echo "[+] 已移除构建产物 dtb/dtbo.img —— 让设备沿用 ROM 自带的 dtb/dtbo（端口面板/变体更对口）"
+
+      - name: 🔩 Pack Process
+        uses: ./.github/workflows/pack-process
+
+      - name: ✏️ Upload Artifacts
+        uses: ./.github/workflows/upload-files
