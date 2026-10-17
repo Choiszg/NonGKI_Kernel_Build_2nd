@@ -395,13 +395,11 @@ jobs:
             device_kernel/out/Module.symvers
             device_kernel/out/.config
             device_kernel/out/System.map
+            device_kernel/out/arch/arm64/boot/Image
+            device_kernel/out/arch/arm64/boot/dtb
+            device_kernel/out/arch/arm64/boot/dtb.img
+            device_kernel/out/arch/arm64/boot/dtbo.img
           if-no-files-found: warn
-
-      - name: ❗ Keep ROM dtb/dtbo
-        run: |
-          cd $GITHUB_WORKSPACE/device_kernel
-          rm -f out/arch/arm64/boot/dtbo.img out/arch/arm64/boot/dtb
-          echo "[+] 已移除构建产物 dtb/dtbo.img —— 让设备沿用 ROM 自带的 dtb/dtbo（端口面板/变体更对口）"
 
       - name: 🔩 Pack Process
         uses: ./.github/workflows/pack-process
