@@ -350,6 +350,8 @@ jobs:
           # --- v10: 让内核接受端口原版模块（不动 vendor）--------------------------
           # 1) localversion 与端口模块的 vermagic 完全一致
           sed -i '/^CONFIG_LOCALVERSION=/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }} || true
+          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }} || true
+          echo '# CONFIG_LOCALVERSION_AUTO is not set' >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           echo 'CONFIG_LOCALVERSION="-miru-h40-wave39-task-ovl-ci1"' >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           tail -3 arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           # 2) 跳过模块符号 CRC 校验（vermagic 的其余 token 仍会校验）
