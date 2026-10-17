@@ -1,4 +1,4 @@
-name: Build OnePlus 7 Pro v10 (accept port modules: localversion + CRC bypass)
+name: Build OnePlus 7 Pro v10 (accept port modules - localversion + CRC bypass)
 
 on:
   workflow_call:
