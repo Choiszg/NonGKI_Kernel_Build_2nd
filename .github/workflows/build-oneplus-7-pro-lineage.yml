@@ -19,7 +19,7 @@ env:
   KERNEL_BRANCH : "lineage-21"
 
   # Neutron 工具链（与 JackA1ltman 的 K20（同 SM8150）用的一致）
-  CLANG_SOURCE : "https://github.com/ZyCromerZ/Clang/releases/download/10.0.1-20220724-release/Clang-10.0.1-20220724.tar.gz"
+  CLANG_SOURCE : "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r1/clang-r383902.tar.gz"
   CLANG_BRANCH : ""
 
   GCC_GNU : false
@@ -123,41 +123,11 @@ jobs:
           # Only ${{ env.DEVICE_NAME }} use it.
           cd $GITHUB_WORKSPACE/device_kernel
 
-          # --- clang 兼容修正 -------------------------------------------------
-          # lineage-21 树保留 4.14 老写法，其中两处只有 GCC 接受、clang 直接报错：
-          #  (1) stack_pointer.h 用「全局 register 变量 = sp」，clang 不允许全局 sp
-          #      -> 改为语句表达式里的【局部】register（取自 JackA1ltman 的 K20 内核树）
-          #  (2) spinlock.h 用 "I"(1 << TICKET_SHIFT)=65536，超出 I 约束 12 位立即数
-          #      -> 改为寄存器约束 "r"（汇编模板本就是 %5 寄存器形式，语义等价）
-          cat > arch/arm64/include/asm/stack_pointer.h <<'SPEOF'
-          /* SPDX-License-Identifier: GPL-2.0 */
-          #ifndef __ASM_STACK_POINTER_H
-          #define __ASM_STACK_POINTER_H
-
-          /*
-           * how to get the current stack pointer from C
-           */
-          #define current_stack_pointer \
-          ({									\
-          	register unsigned long __current_stack_pointer asm ("sp");	\
-          									\
-          	__current_stack_pointer;					\
-          })
-
-          #endif /* __ASM_STACK_POINTER_H */
-          SPEOF
-          sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' arch/arm64/include/asm/spinlock.h
           # trylock 模板里漏了 %w 修饰符：改成 "r" 后 clang 会用 x 寄存器打印 %3，
           # 于是 `add w0, w0, x9` 混用 W/X 寄存器报错 -> 补上 w 修饰符
-          sed -i -e 's|add\t%w0, %w0, %3|add\t%w0, %w0, %w3|g' \
-                 -e 's|add\t%w1, %w0, %3|add\t%w1, %w0, %w3|g' \
-                 -e 's|sub\t%w1, %w1, %3|sub\t%w1, %w1, %w3|g' \
-                 arch/arm64/include/asm/spinlock.h
-          echo "[+] trylock operands fixed:"; grep -nE '%w3' arch/arm64/include/asm/spinlock.h | head -5
 
           echo "[+] clang compat fixups applied:"
           grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
-          grep -n "TICKET_SHIFT" arch/arm64/include/asm/spinlock.h
 
           # --- vDSO 汇编目标架构修正 -------------------------------------------
           # 4.14 的 vdso/Makefile 用 `$(CC) $(a_flags) -c` 汇编 .S，但没有带上
@@ -165,9 +135,7 @@ jobs:
           # 结果汇编器按宿主 x86_64 解析，cbz/svc/adr 等 AArch64 指令全被判非法。
           # 这里给该规则显式补上目标三元组（防漏）。
           if [ -f arch/arm64/kernel/vdso/Makefile ]; then
-            sed -i 's|\$(CC) \$(a_flags)|$(CC) $(a_flags) --target=aarch64-linux-gnu|g' arch/arm64/kernel/vdso/Makefile
             echo "[+] vdso/Makefile patched:"
-            grep -n "target=aarch64-linux-gnu" arch/arm64/kernel/vdso/Makefile || echo "[-] no a_flags line matched"
           fi
           if [ -f arch/arm64/kernel/vdso32/Makefile ]; then
             sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
