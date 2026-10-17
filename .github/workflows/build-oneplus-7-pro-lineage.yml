@@ -123,20 +123,6 @@ jobs:
           # Only ${{ env.DEVICE_NAME }} use it.
           cd $GITHUB_WORKSPACE/device_kernel
 
-          # trylock 模板里漏了 %w 修饰符：改成 "r" 后 clang 会用 x 寄存器打印 %3，
-          # 于是 `add w0, w0, x9` 混用 W/X 寄存器报错 -> 补上 w 修饰符
-
-          echo "[+] clang compat fixups applied:"
-          grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
-
-          # --- vDSO 汇编目标架构修正 -------------------------------------------
-          # 4.14 的 vdso/Makefile 用 `$(CC) $(a_flags) -c` 汇编 .S，但没有带上
-          # --target（顶层 Makefile 只在 CROSS_COMPILE 非空时注入 CLANG_FLAGS）。
-          # 结果汇编器按宿主 x86_64 解析，cbz/svc/adr 等 AArch64 指令全被判非法。
-          # 这里给该规则显式补上目标三元组（防漏）。
-          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
-            echo "[+] vdso/Makefile patched:"
-          fi
           if [ -f arch/arm64/kernel/vdso32/Makefile ]; then
             sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
           fi
