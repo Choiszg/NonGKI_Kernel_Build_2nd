@@ -1,0 +1,516 @@
+name: Build OnePlus 7 Pro v21 (v19b + afe_dsm/pm8008 symbols - audio fix)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  # Device env
+  DEVICE_NAME : "oneplus_7_pro"
+  DEVICE_CODENAME : "guacamole"
+
+  CUSTOM_CMDS : "CLANG_TRIPLE=aarch64-linux-gnu-"
+  EXTRA_CMDS : "LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-"
+
+  # 内核源码：LineageOS 官方 sm8150 的 lineage-21（Android 14）分支
+  # 版本 4.14.355-openela —— 与设备现用的 4.14.357-openela-miru 几乎同源
+  KERNEL_SOURCE : "https://github.com/LineageOS/android_kernel_oneplus_sm8150.git"
+  KERNEL_BRANCH : "lineage-21"
+
+  # Neutron 工具链（与 JackA1ltman 的 K20（同 SM8150）用的一致）
+  CLANG_SOURCE : "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+  CLANG_BRANCH : ""
+
+  GCC_GNU : false
+  GCC_64_SOURCE : ""
+  GCC_64_BRANCH : ""
+  GCC_32_SOURCE : ""
+  GCC_32_BRANCH : ""
+
+  DEFCONFIG_SOURCE: ""
+  DEFCONFIG_NAME : "lineage_sm8150_defconfig"
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
+
+  KERNELSU_SOURCE : ""
+  KERNELSU_BRANCH : ""
+
+  KERNELSU_AUTO_GET : "true"
+  KERNELSU_AUTO_FORK : "bakasu" # xxksu, rsuntk, next, bakasu and sukisu
+
+  SUSFS_ENABLE : true
+  SUSFS_FIXED : true
+
+  # 用 ebears 那份 OnePlus 7 专用的 AnyKernel3（设备分区/fstab 已适配）
+  AK3_SOURCE : "https://github.com/ebears/AnyKernel3.git"
+  AK3_BRANCH : "oneplus7"
+
+  BOOT_SOURCE : ""
+
+  NEED_DTBO : false
+  NEED_SAFE_DTBO : false
+
+  ROM_TEXT : "cos14"
+
+  # Other env
+  PYTHON_VERSION: "3"
+
+  PACK_METHOD: "AnyKernel3"
+  PACK_KMODULES: "true"
+
+  KERNELSU_METHOD: "shell"
+
+  # op_kernel = OnePlus 内核专用补丁分支（含 4.14 的 SUSFS 实现与 hook 脚本）
+  PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
+  PATCHES_BRANCH: "op_kernel"
+
+  SUSFS_FOLDER_FIXED: ""
+  SUSFS_PATCH_FIXED: ""
+
+  REKERNEL_ENABLE: "false"
+  DROIDSPACES_ENABLE: "false"
+  NOMOUNT_ENABLE: "false"
+
+  HOOK_METHOD: "syscall"
+
+  KPM_ENABLE: "false"
+  KPM_INLINE: "false"
+  KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux"
+
+  BASEBAND_GUARD_ENABLE: "false"
+  BASEBAND_GUARD_BOOT: "false"
+
+  GENERATE_DTB: "false"
+  GENERATE_CHIP: "qcom"
+
+  BUILD_DEBUGGER: "true"
+  SKIP_PATCH: "true"
+
+  BUILD_OTHER_CONFIG: "false"
+  MERGE_CONFIG_FILES: ""
+
+  FREE_MORE_SPACE: "false"
+
+jobs:
+  build-kernel:
+    name: OnePlus 7 Pro v21 (v19b + afe_dsm/pm8008 symbols - audio fix)
+    runs-on: ubuntu-24.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: ⏰ Checkout repository
+        uses: actions/checkout@v6
+
+      - name: ⌛️ Compilation environment preparation
+        uses: ./.github/workflows/build-env
+
+      - name: ⚙️ Get necessary tools
+        uses: ./.github/workflows/build-ready
+
+      - name: 🪝 Patch Kernel of SUSFS
+        uses: ./.github/workflows/patch-susfs
+
+      - name: 🔗 Patch for no-kprobe
+        uses: ./.github/workflows/patch-no-kprobe
+
+      - name: 🪛 Extra Kernel Options
+        run: |
+          # Only ${{ env.DEVICE_NAME }} use it.
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # --- clang 兼容修正 -------------------------------------------------
+          # lineage-21 树保留 4.14 老写法，其中两处只有 GCC 接受、clang 直接报错：
+          #  (1) stack_pointer.h 用「全局 register 变量 = sp」，clang 不允许全局 sp
+          #      -> 改为语句表达式里的【局部】register（取自 JackA1ltman 的 K20 内核树）
+          #  (2) spinlock.h 用 "I"(1 << TICKET_SHIFT)=65536，超出 I 约束 12 位立即数
+          #      -> 改为寄存器约束 "r"（汇编模板本就是 %5 寄存器形式，语义等价）
+          cat > arch/arm64/include/asm/stack_pointer.h <<'SPEOF'
+          /* SPDX-License-Identifier: GPL-2.0 */
+          #ifndef __ASM_STACK_POINTER_H
+          #define __ASM_STACK_POINTER_H
+
+          /*
+           * how to get the current stack pointer from C
+           */
+          #define current_stack_pointer \
+          ({									\
+          	register unsigned long __current_stack_pointer asm ("sp");	\
+          									\
+          	__current_stack_pointer;					\
+          })
+
+          #endif /* __ASM_STACK_POINTER_H */
+          SPEOF
+          sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' arch/arm64/include/asm/spinlock.h
+          # trylock 模板里漏了 %w 修饰符：改成 "r" 后 clang 会用 x 寄存器打印 %3，
+          # 于是 `add w0, w0, x9` 混用 W/X 寄存器报错 -> 补上 w 修饰符
+          sed -i -e 's|add\t%w0, %w0, %3|add\t%w0, %w0, %w3|g' \
+                 -e 's|add\t%w1, %w0, %3|add\t%w1, %w0, %w3|g' \
+                 -e 's|sub\t%w1, %w1, %3|sub\t%w1, %w1, %w3|g' \
+                 arch/arm64/include/asm/spinlock.h
+          echo "[+] trylock operands fixed:"; grep -nE '%w3' arch/arm64/include/asm/spinlock.h | head -5
+
+          echo "[+] clang compat fixups applied:"
+          grep -n "__current_stack_pointer" arch/arm64/include/asm/stack_pointer.h | head -3
+          grep -n "TICKET_SHIFT" arch/arm64/include/asm/spinlock.h
+
+          # --- vDSO 汇编目标架构修正 -------------------------------------------
+          # 4.14 的 vdso/Makefile 用 `$(CC) $(a_flags) -c` 汇编 .S，但没有带上
+          # --target（顶层 Makefile 只在 CROSS_COMPILE 非空时注入 CLANG_FLAGS）。
+          # 结果汇编器按宿主 x86_64 解析，cbz/svc/adr 等 AArch64 指令全被判非法。
+          # 这里给该规则显式补上目标三元组（防漏）。
+          if [ -f arch/arm64/kernel/vdso/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags)|$(CC) $(a_flags) --target=aarch64-linux-gnu|g' arch/arm64/kernel/vdso/Makefile
+            echo "[+] vdso/Makefile patched:"
+            grep -n "target=aarch64-linux-gnu" arch/arm64/kernel/vdso/Makefile || echo "[-] no a_flags line matched"
+          fi
+          if [ -f arch/arm64/kernel/vdso32/Makefile ]; then
+            sed -i 's|\$(CC) \$(a_flags32)|$(CC) $(a_flags32) --target=arm-linux-gnueabi|g' arch/arm64/kernel/vdso32/Makefile || true
+          fi
+
+          # --- .dtbo overlay 编不过 -> 换成它原本的基础 dtb --------------------------
+          # 本树的 dtbs 是默认目标第一项（arm64/Makefile: all: $(KBUILD_DTBS) $(KBUILD_TARGET)），
+          # 绕不开。各 dts 子目录（18821/18857/18865/19863/19801/qcom ...）在 DT_OVERLAY=y
+          # 时列的都是 plugin overlay：
+          #   dtbo-$(CONFIG_ARCH_SM8150) += \
+          #       sm8150-mtp-overlay.dtbo ...
+          #   sm8150-mtp-overlay.dtbo-base := sm8150.dtb sm8150-v2.dtb sm8150p.dtb sm8150p-v2.dtb
+          # 这些 overlay 在本构建环境里 dtc 一律报 `pm8150.dtsi:21.1-10 syntax error`
+          # （&spmi_bus 引用处）编不过；而它们 -base 里那 4 个基础 dtb 正是 Image.gz-dtb 要
+          # 携带的（设备现用 boot 内嵌 compatible 就是 qcom,sm8150-mtp / qcom,sm8150p 这组）。
+          # 所以【不动 CONFIG】：把每条 dtbo 语句就地换成它 -base 里的基础 dtb（该目录确实存在
+          # 对应 .dts 才加），其余 dtbo 语句一律注掉。这样 dtbs 能通过，Image.gz-dtb 的 dtb
+          # 集合与原设计一致；dtbo 分区由 ROM 提供，AK3 只刷 boot，不需要在树里重建 dtbo。
+          python3 - <<'PYEOF'
+          import glob, os, re
+
+          pat_base = re.compile(r'^\s*([A-Za-z0-9_.-]+\.dtbo)-base\s*:=\s*(.+?)\s*$')
+          pat_cfg  = re.compile(r'^\s*dtbo-\$\(([A-Za-z0-9_]+)\)\s*\+=\s*(.*)$')
+          pat_any  = re.compile(r'^\s*dtbo-')
+
+          added, dropped, other = [], [], []
+          for mk in sorted(glob.glob('arch/arm64/boot/dts/**/Makefile', recursive=True)):
+              d = os.path.dirname(mk)
+              src = open(mk).read().splitlines()
+              bases = {}
+              for ln in src:
+                  m = pat_base.match(ln)
+                  if m:
+                      bases[m.group(1)] = m.group(2)
+              out, i, hit = [], 0, False
+              while i < len(src):
+                  ln = src[i]
+                  if pat_any.match(ln):
+                      hit = True
+                      stmt = [ln]
+                      while stmt[-1].rstrip().endswith('\\') and i + 1 < len(src):
+                          i += 1
+                          stmt.append(src[i])
+                      joined = ' '.join(x.rstrip().rstrip('\\') for x in stmt).strip()
+                      m = pat_cfg.match(joined)
+                      keep = []
+                      if m:
+                          cfg = m.group(1)
+                          for obj in m.group(2).split():
+                              bl = bases.get(obj)
+                              if not bl:
+                                  dropped.append('%s: %s (无 base)' % (mk, obj))
+                                  continue
+                              ok = [b for b in bl.split() if os.path.exists(os.path.join(d, b[:-4] + '.dts'))]
+                              if ok:
+                                  for b in ok:
+                                      if b not in keep:
+                                          keep.append(b)
+                                  if len(ok) != len(bl.split()):
+                                      dropped.append('%s: %s (部分 base 缺 .dts)' % (mk, obj))
+                              else:
+                                  dropped.append('%s: %s (base .dts 不存在)' % (mk, obj))
+                      if m and keep:
+                          out.append('dtb-$(%s) += %s' % (cfg, ' '.join(keep)))
+                          added.append('%s -> dtb-$(%s) += %s' % (mk, cfg, ' '.join(keep)))
+                      else:
+                          out.append('#dtbo-off: ' + joined)
+                          other.append('%s: %s' % (mk, joined[:90]))
+                      i += 1
+                      continue
+                  if pat_base.match(ln):
+                      out.append('#dtbo-off: ' + ln.strip())
+                      i += 1
+                      continue
+                  out.append(ln)
+                  i += 1
+              if hit:
+                  open(mk, 'w').write('\n'.join(out) + '\n')
+
+          print('[+] 加了基础 dtb (%d 处):' % len(added))
+          for a in added:
+              print('    ' + a)
+          print('[+] 注掉的 dtbo 语句 (%d 处，未逐条列出)' % len(other))
+          print('[+] 丢弃的 overlay 对象 (%d 个，前 5 条):' % len(dropped))
+          for a in dropped[:5]:
+              print('    ' + a)
+          PYEOF
+          echo "[+] 校验：是否还有未处理的 dtbo 目标（应为空）"
+          if grep -rnE '^[[:space:]]*dtbo-' --include=Makefile arch/arm64/boot/dts; then
+            echo "[-] 仍有未处理的 dtbo 目标"; exit 1
+          fi
+          echo "[+] 各目录现在的 dtb 清单："
+          grep -rnE 'dtb-\$\(CONFIG_ARCH_[A-Z0-9_]+\) \+= ' --include=Makefile arch/arm64/boot/dts
+
+          # --- 确认 KernelSU 真能编进内核（依赖不满足会被 kconfig 整条丢掉）-----------
+          # 两代 KSU 的依赖不同：
+          #   SukiSU susfs_new : config KSU depends on KPROBES && EXT4_FS（4.14 默认没开 KPROBES）
+          #   BakaSU / builtin  : config KSU 无依赖（走手动钩子）
+          # 策略：先按树里的 defconfig 原样解析一次；只有 CONFIG_KSU 没出来时，
+          #       才补上 CONFIG_KPROBES=y 再解析一次。两次都不行就直接失败，
+          #       绝不带着"没有 KSU 的内核"去跑完 10 分钟的编译。
+          DEFCFG=arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          for c in CONFIG_KSU=y CONFIG_KSU_SUSFS=y; do
+            grep -qxF "$c" "$DEFCFG" || echo "$c" >> "$DEFCFG"
+          done
+          ksu_precheck() {
+            rm -rf /tmp/ksucheck
+            make O=/tmp/ksucheck ARCH=arm64 "${{ env.DEFCONFIG_NAME }}" > /tmp/ksucheck.log 2>&1 || return 2
+            grep -q '^CONFIG_KSU=y' /tmp/ksucheck/.config
+          }
+          if ksu_precheck; then
+            echo "[+] CONFIG_KSU=y 已生效 ✔（无需 KPROBES）"
+          else
+            echo "[!] CONFIG_KSU 未启用，补 CONFIG_KPROBES=y 后重试"
+            sed -i -e '/^CONFIG_KPROBES=/d' -e '/^# CONFIG_KPROBES is not set/d' "$DEFCFG"
+            echo "CONFIG_KPROBES=y" >> "$DEFCFG"
+            if ksu_precheck; then
+              echo "[+] 补 KPROBES 后 CONFIG_KSU=y 生效 ✔"
+            else
+              echo "[-] CONFIG_KSU 仍未启用 —— 提前停止，避免白跑一整轮"
+              tail -20 /tmp/ksucheck.log
+              grep -niE 'ksu|kprobe' /tmp/ksucheck/.config | head
+              exit 1
+            fi
+          fi
+          echo "[+] 预检结果："; grep -E '^CONFIG_KPROBES=|^CONFIG_KSU|^# CONFIG_KSU' /tmp/ksucheck/.config
+
+          # --- BakaSU 的 SUSFS 版本闸门（临时占位）------------------------------------
+          # kernel/tools/susfs_compat.mk 末尾有一句无条件的
+          #   $(error Please wait susfs update.)
+          # 是作者在等 simonpunk 的 SUSFS 补丁跟进时放的临时停牌；同文件上面的两个
+          # grep 已经会按 SUSFS 变体自动加 -DKSU_COMPAT_HAS_SUSFS_*，说明代码本身
+          # 是双路的。这里把这一行去掉，让编译结果说话。
+          SUSFSCOMPAT=drivers/kernelsu/tools/susfs_compat.mk
+          if [ -f "$SUSFSCOMPAT" ]; then
+            sed -i '/Please wait susfs update/d' "$SUSFSCOMPAT"
+            echo "[+] 已移除 SUSFS 版本闸门，文件尾部："; tail -4 "$SUSFSCOMPAT"
+          fi
+
+
+          # --- KSU 代码的 4.14 非 GKI 兼容层 -----------------------------------------
+          # SukiSU-Ultra 的 susfs_new 分支有三处假定内核 ≥4.17/5.4 的东西，
+          # 4.14 上会直接编译失败（本地扫过整棵 KSU 树，就这三处）：
+          #   1) syscall_fn_t    —— 4.17 才进 include/linux/syscalls.h
+          #      （hook/syscall_hook.h 只在 __x86_64__ 下 typedef，arm64 直接缺类型）
+          #   2) MODULE_IMPORT_NS —— 5.4+；4.14 上会退化成隐式 int 声明
+          #   3) fallthrough     —— 5.4+ 的伪关键字；policy/allowlist.c:499 用到
+          # 用一个强制 -include 的兼容头一次性补齐（比逐个改源文件稳）。
+          if [ -f drivers/kernelsu/compat/kernel_compat.h ]; then
+            echo "[+] 该 KSU 树自带 compat 层（BakaSU 风格：syscall_fn_t / TWA_* / fallthrough / kernel_read 都已处理），跳过我们的兼容头"
+          else
+          cat > drivers/kernelsu/dsh_414_compat.h <<'CMPEOF'
+          #ifndef __DSH_NONGKI_414_COMPAT_H
+          #define __DSH_NONGKI_414_COMPAT_H
+          #include <linux/version.h>
+
+          #if defined(__aarch64__) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+          typedef long (*syscall_fn_t)(const struct pt_regs *regs);
+          #endif
+
+          #ifndef MODULE_IMPORT_NS
+          #define MODULE_IMPORT_NS(ns)
+          #endif
+
+          #ifndef fallthrough
+          #define fallthrough do { } while (0)
+          #endif
+          #endif /* __DSH_NONGKI_414_COMPAT_H */
+          CMPEOF
+          grep -q 'dsh_414_compat.h' drivers/kernelsu/Kbuild \
+            || printf '\nccflags-y += -include $(srctree)/drivers/kernelsu/dsh_414_compat.h\n' >> drivers/kernelsu/Kbuild
+          echo "[+] KSU 兼容层就绪："
+          grep -n 'dsh_414_compat' drivers/kernelsu/Kbuild
+          grep -c . drivers/kernelsu/dsh_414_compat.h
+          fi
+
+          # --- 关掉强制模块签名（LOS defconfig 默认 =y，会拒绝所有未签名模块）---
+          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          echo "[+] MODULE_SIG_FORCE disabled in defconfig"
+
+          # --- v10: 让内核接受端口原版模块（不动 vendor）--------------------------
+          # 1) localversion 与端口模块的 vermagic 完全一致
+          sed -i '/^CONFIG_LOCALVERSION=/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }} || true
+          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' arch/arm64/configs/${{ env.DEFCONFIG_NAME }} || true
+          echo '# CONFIG_LOCALVERSION_AUTO is not set' >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          echo 'CONFIG_LOCALVERSION="-miru-h40-wave39-task-ovl-ci1"' >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          tail -3 arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+
+          # --- v12: 开启 pstore/ramoops（DT 已有 ramoops@0xA9800000 标准节点，自动探测）------
+          # 死机/卡死时内核日志写入保留内存，TWRP 里可从 /sys/fs/pstore/console-ramoops-0 读出
+          cat >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }} <<'PSEOF'
+          CONFIG_PSTORE=y
+          CONFIG_PSTORE_RAM=y
+          CONFIG_PSTORE_CONSOLE=y
+          CONFIG_PSTORE_PMSG=y
+          CONFIG_PSTORE_FTRACE=y
+          PSEOF
+          echo "[+] pstore/ramoops enabled in defconfig"
+          tail -6 arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
+          # --- v15: 启用 BakaSU MANUAL_HOOK（LSM 自动 init.rc 注入）--------------------
+          # 根因：MANUAL_HOOK=n 时 read 钩子被 #ifdef 关闭、LSM 注入未编译 → KERNEL_SU_RC
+          # 是死代码 → ksud 永不启动。4.14 非 GKI 必须走 manual hook 路径。
+          cat >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }} <<'MHOF'
+          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y
+          CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y
+          CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y
+          MHOF
+          echo "[+] KSU_MANUAL_HOOK enabled"
+          grep -E "KSU_MANUAL" arch/arm64/configs/${{ env.DEFCONFIG_NAME }} || true
+          # --- v11: OPLUS 兼容垫片 (沿用)（补齐移植 ROM 厂商模块需要的导出符号）------
+          cat > drivers/misc/oplus_compat.c <<'OPLUSEOF'
+          /* DSH_OPLUS_COMPAT: LineageOS 树缺失、移植 ROM 厂商模块需要的 OPLUS 导出符号 */
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/types.h>
+
+          /* 原实现: drivers/soc/qcom/subsystem_restart.c —— 记录子系统重启状态 */
+          static bool dsh_ssr_state;
+
+          void oplus_set_ssr_state(bool ssr_state)
+          {
+          	dsh_ssr_state = ssr_state;
+          }
+          EXPORT_SYMBOL(oplus_set_ssr_state);
+
+          bool oplus_get_ssr_state(void)
+          {
+          	return dsh_ssr_state;
+          }
+          EXPORT_SYMBOL(oplus_get_ssr_state);
+
+          /* 原实现: net/oplus_wificapcenter —— WFD 投屏钩子注册；无 WFD 需求时留空 */
+          void register_oplus_wfd_wlan_ops(void *ops)
+          {
+          	(void)ops;
+          }
+          EXPORT_SYMBOL(register_oplus_wfd_wlan_ops);
+          OPLUSEOF
+          grep -q 'oplus_compat' drivers/misc/Makefile || echo 'obj-y += oplus_compat.o' >> drivers/misc/Makefile
+          echo "[+] OPLUS 垫片就绪:"
+          grep -n 'oplus_compat' drivers/misc/Makefile
+          head -6 drivers/misc/oplus_compat.c
+          # 2) 跳过模块符号 CRC 校验（vermagic 的其余 token 仍会校验）
+          python3 - <<'CRC'
+          import re,sys
+          p='kernel/module.c'
+          s=open(p,errors='replace').read()
+          if 'DSH_CRC_BYPASS' in s:
+              print('[+] CRC 旁路已存在')
+          else:
+              m=re.search(r'(static int check_version\([^)]*\)\s*\{)', s)
+              if not m:
+                  print('[!] 未找到 check_version，跳过'); sys.exit(0)
+              s=s[:m.end(1)]+'\n\t/* DSH_CRC_BYPASS: 接受端口原版模块 */\n\treturn 1;'+s[m.end(1):]
+              open(p,'w').write(s)
+              print('[+] CRC 校验已旁路（check_version 直接返回 1）')
+          CRC
+          grep -n "DSH_CRC_BYPASS" -A2 kernel/module.c | head -4
+
+      - name: 🧰 Patch Kernel of Re:Kernel
+        uses: ./.github/workflows/patch-rekernel
+
+      - name: 💿 Patch Kernel of Droidspaces
+        uses: ./.github/workflows/patch-droidspaces
+
+      - name: 🔒 Patch Kernel of Baseband Guard
+        uses: ./.github/workflows/patch-baseband-guard
+
+      - name: 🛡️ Patch Kernel of NoMount
+        uses: ./.github/workflows/patch-nomount
+
+      - name: 🧹 Remove legacy 1-arg read hook (ksu_is_init_rc_hook_enabled)
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          echo "aW1wb3J0IHN5cwpwID0gJ2ZzL3JlYWRfd3JpdGUuYycKcyA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCmxpbmVzID0gcy5zcGxpdCgnXG4nKQpvdXQgPSBbXQppID0gMApyZW1vdmVkID0gMAp3aGlsZSBpIDwgbGVuKGxpbmVzKToKICAgIGwgPSBsaW5lc1tpXQogICAgIyDmiJDlnZfliKDpmaTvvJojaWZkZWYgQ09ORklHX0tTVV9NQU5VQUxfSE9PSyAuLi4gI2VuZGlmIOS4reWQq+aXp+espuWPt+eahOWdlwogICAgaWYgJ0NPTkZJR19LU1VfTUFOVUFMX0hPT0snIGluIGw6CiAgICAgICAgYmxrID0gJ1xuJy5qb2luKGxpbmVzW2k6aSs4XSkKICAgICAgICBpZiAna3N1X2lzX2luaXRfcmNfaG9va19lbmFibGVkJyBpbiBibGsgb3IgJ2tzdV9oYW5kbGVfc3lzX3JlYWQnIGluIGJsazoKICAgICAgICAgICAgaiA9IGkKICAgICAgICAgICAgd2hpbGUgaiA8IGxlbihsaW5lcykgYW5kIG5vdCBsaW5lc1tqXS5zdHJpcCgpLnN0YXJ0c3dpdGgoJyNlbmRpZicpOgogICAgICAgICAgICAgICAgaiArPSAxCiAgICAgICAgICAgIHJlbW92ZWQgKz0gMQogICAgICAgICAgICBpID0gaiArIDEKICAgICAgICAgICAgY29udGludWUKICAgIG91dC5hcHBlbmQobCkKICAgIGkgKz0gMQojIOesrOS6jOmBje+8muWIoOmZpOS7u+S9leaui+eVmeeahOaXp+espuWPt+ihjO+8iOijuCBleHRlcm4g562J77yJCmZpbmFsID0gW10KZm9yIGwgaW4gb3V0OgogICAgaWYgJ2tzdV9pc19pbml0X3JjX2hvb2tfZW5hYmxlZCcgaW4gbCBvciAna3N1X2hhbmRsZV9zeXNfcmVhZCcgaW4gbDoKICAgICAgICByZW1vdmVkICs9IDEKICAgICAgICBjb250aW51ZQogICAgZmluYWwuYXBwZW5kKGwpCm9wZW4ocCwgJ3cnKS53cml0ZSgnXG4nLmpvaW4oZmluYWwpKQpwcmludChmJ3JlbW92ZWQge3JlbW92ZWR9JykKIyDoh6rmo4DvvJrku4Xlr7njgJDosIPnlKjngrnjgJHmiqXorabvvIjoo7jlo7DmmI7lt7LliKDvvIznkIborrrkuIrkuI3lupTmnInku7vkvZXmrovnlZnvvIkKczIgPSBvcGVuKHApLnJlYWQoKQpiYWQgPSBbXQpmb3IgbiwgbCBpbiBlbnVtZXJhdGUoczIuc3BsaXQoJ1xuJyksIDEpOgogICAgaWYgJ2tzdV9pc19pbml0X3JjX2hvb2tfZW5hYmxlZCcgaW4gbCBvciAna3N1X2hhbmRsZV9zeXNfcmVhZCcgaW4gbDoKICAgICAgICBiYWQuYXBwZW5kKGYne259OiB7bC5zdHJpcCgpWzoxMDBdfScpCmlmIGJhZDoKICAgIHByaW50KCdbLV0g5LuN5q6L55WZOicpOyBbcHJpbnQoJyAgICcsIGIpIGZvciBiIGluIGJhZF07IHN5cy5leGl0KDEpCnByaW50KCdbK10gbGVnYWN5IGhvb2sgZnVsbHkgcmVtb3ZlZCcpCg==" | base64 -d > /tmp/rm_old_hook.py
+          python3 /tmp/rm_old_hook.py
+          grep -c "ksu_is_init_rc_hook_enabled" fs/read_write.c || echo "[+] 旧符号已清零"
+
+      - name: 🩹 Patch stat.c/reboot.c/selinuxfs.c (BakaSU manual hooks)
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          echo "aW1wb3J0IHN5cwoKIyAtLS0gMSkgZnMvc3RhdC5jOiBuZXdmc3RhdF9yZXQgKyBmc3RhdDY0X3JldCAtLS0KcCA9ICdmcy9zdGF0LmMnCnMgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQppZiAna3N1X2hhbmRsZV9uZXdmc3RhdF9yZXQnIGluIHM6CiAgICBwcmludCgnWytdIHN0YXQuYyBhbHJlYWR5IHBhdGNoZWQnKQplbHNlOgogICAgc2lnX24gPSAnU1lTQ0FMTF9ERUZJTkUyKG5ld2ZzdGF0LCB1bnNpZ25lZCBpbnQsIGZkLCBzdHJ1Y3Qgc3RhdCBfX3VzZXIgKiwgc3RhdGJ1ZiknCiAgICBpID0gcy5maW5kKHNpZ19uKQogICAgaWYgaSA8IDA6CiAgICAgICAgcHJpbnQoJ1stXSBuZXdmc3RhdCBzaWcgbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCiAgICBkZWNscyA9ICgKICAgICAgICAiI2lmZGVmIENPTkZJR19LU1VfTUFOVUFMX0hPT0tcbiIKICAgICAgICAiZXh0ZXJuIHZvaWQga3N1X2hhbmRsZV9uZXdmc3RhdF9yZXQodW5zaWduZWQgaW50ICpmZCwgc3RydWN0IHN0YXQgX191c2VyICoqc3RhdGJ1Zl9wdHIpO1xuIgogICAgICAgICIjaWYgZGVmaW5lZChfX0FSQ0hfV0FOVF9TVEFUNjQpIHx8IGRlZmluZWQoX19BUkNIX1dBTlRfQ09NUEFUX1NUQVQ2NClcbiIKICAgICAgICAiZXh0ZXJuIHZvaWQga3N1X2hhbmRsZV9mc3RhdDY0X3JldCh1bnNpZ25lZCBsb25nICpmZCwgc3RydWN0IHN0YXQ2NCBfX3VzZXIgKipzdGF0YnVmX3B0cik7XG4iCiAgICAgICAgIiNlbmRpZlxuIgogICAgICAgICIjZW5kaWZcblxuIgogICAgKQogICAgcyA9IHNbOmldICsgZGVjbHMgKyBzW2k6XQogICAgaSA9IHMuZmluZChzaWdfbikKICAgIGogPSBzLmZpbmQoJ3JldHVybiBlcnJvcjsnLCBpKQogICAgayA9IHMuZmluZCgnU1lTQ0FMTF9ERUZJTkUnLCBpICsgMTApCiAgICBpZiBub3QgKDAgPCBqIDwgayk6CiAgICAgICAgcHJpbnQoJ1stXSBuZXdmc3RhdCByZXR1cm4gbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCiAgICBzID0gc1s6al0gKyAiI2lmZGVmIENPTkZJR19LU1VfTUFOVUFMX0hPT0tcblx0a3N1X2hhbmRsZV9uZXdmc3RhdF9yZXQoJmZkLCAmc3RhdGJ1Zik7XG4jZW5kaWZcblx0IiArIHNbajpdCiAgICBzaWdfZiA9ICdTWVNDQUxMX0RFRklORTIoZnN0YXQ2NCwgdW5zaWduZWQgbG9uZywgZmQsIHN0cnVjdCBzdGF0NjQgX191c2VyICosIHN0YXRidWYpJwogICAgaSA9IHMuZmluZChzaWdfZikKICAgIGlmIGkgPCAwOgogICAgICAgIHByaW50KCdbLV0gZnN0YXQ2NCBzaWcgbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCiAgICBqID0gcy5maW5kKCdyZXR1cm4gZXJyb3I7JywgaSkKICAgIGsgPSBzLmZpbmQoJ1NZU0NBTExfREVGSU5FJywgaSArIDEwKQogICAgaWYgbm90ICgwIDwgaiA8IGspOgogICAgICAgIHByaW50KCdbLV0gZnN0YXQ2NCByZXR1cm4gbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCiAgICBzID0gc1s6al0gKyAiI2lmZGVmIENPTkZJR19LU1VfTUFOVUFMX0hPT0sgLy8gZm9yIDMyLWJpdFxuXHRrc3VfaGFuZGxlX2ZzdGF0NjRfcmV0KCZmZCwgJnN0YXRidWYpO1xuI2VuZGlmXG5cdCIgKyBzW2o6XQogICAgb3BlbihwLCAndycpLndyaXRlKHMpCiAgICBwcmludCgnWytdIGZzL3N0YXQuYzogbmV3ZnN0YXRfcmV0ICsgZnN0YXQ2NF9yZXQgaW5qZWN0ZWQnKQoKIyAtLS0gMikga2VybmVsL3JlYm9vdC5jOiBzeXNfcmVib290IC0tLQpwID0gJ2tlcm5lbC9yZWJvb3QuYycKcyA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCmlmICdrc3VfaGFuZGxlX3N5c19yZWJvb3QnIGluIHM6CiAgICBwcmludCgnWytdIHJlYm9vdC5jIGFscmVhZHkgcGF0Y2hlZCcpCmVsc2U6CiAgICBzaWcgPSAnU1lTQ0FMTF9ERUZJTkU0KHJlYm9vdCwgaW50LCBtYWdpYzEsIGludCwgbWFnaWMyLCB1bnNpZ25lZCBpbnQsIGNtZCwnCiAgICBpID0gcy5maW5kKHNpZykKICAgIGlmIGkgPCAwOgogICAgICAgIHByaW50KCdbLV0gcmVib290IHNpZyBub3QgZm91bmQnKTsgc3lzLmV4aXQoMSkKICAgIGRlY2xzID0gKAogICAgICAgICIjaWZkZWYgQ09ORklHX0tTVV9NQU5VQUxfSE9PS1xuIgogICAgICAgICJleHRlcm4gaW50IGtzdV9oYW5kbGVfc3lzX3JlYm9vdChpbnQgbWFnaWMxLCBpbnQgbWFnaWMyLCB1bnNpZ25lZCBpbnQgY21kLCB2b2lkIF9fdXNlciAqKmFyZyk7XG4iCiAgICAgICAgIiNlbmRpZlxuXG4iCiAgICApCiAgICBzID0gc1s6aV0gKyBkZWNscyArIHNbaTpdCiAgICBpID0gcy5maW5kKHNpZykKICAgIGogPSBzLmZpbmQoJ3snLCBpKQogICAgaG9vayA9ICgKICAgICAgICAiXG4jaWZkZWYgQ09ORklHX0tTVV9NQU5VQUxfSE9PS1xuIgogICAgICAgICJcdGtzdV9oYW5kbGVfc3lzX3JlYm9vdChtYWdpYzEsIG1hZ2ljMiwgY21kLCAmYXJnKTtcbiIKICAgICAgICAiI2VuZGlmXG4iCiAgICApCiAgICBzID0gc1s6aisxXSArIGhvb2sgKyBzW2orMTpdCiAgICBvcGVuKHAsICd3Jykud3JpdGUocykKICAgIHByaW50KCdbK10ga2VybmVsL3JlYm9vdC5jOiBzeXNfcmVib290IGhvb2sgaW5qZWN0ZWQnKQoKIyAtLS0gMykgc2VsaW51eGZzLmM6IGV4cG9ydCBzZWxfaGFuZGxlX3N0YXR1c19vcHMgLS0tCnAgPSAnc2VjdXJpdHkvc2VsaW51eC9zZWxpbnV4ZnMuYycKcyA9IG9wZW4ocCwgZXJyb3JzPSdyZXBsYWNlJykucmVhZCgpCmlmICdzdGF0aWMgY29uc3Qgc3RydWN0IGZpbGVfb3BlcmF0aW9ucyBzZWxfaGFuZGxlX3N0YXR1c19vcHMnIGluIHM6CiAgICBzID0gcy5yZXBsYWNlKCdzdGF0aWMgY29uc3Qgc3RydWN0IGZpbGVfb3BlcmF0aW9ucyBzZWxfaGFuZGxlX3N0YXR1c19vcHMnLAogICAgICAgICAgICAgICAgICAnY29uc3Qgc3RydWN0IGZpbGVfb3BlcmF0aW9ucyBzZWxfaGFuZGxlX3N0YXR1c19vcHMnKQogICAgb3BlbihwLCAndycpLndyaXRlKHMpCiAgICBwcmludCgnWytdIHNlbF9oYW5kbGVfc3RhdHVzX29wcyBleHBvcnRlZCAoc3RhdGljIHJlbW92ZWQpJykKZWxzZToKICAgIHByaW50KCdbK10gc2VsX2hhbmRsZV9zdGF0dXNfb3BzIGFscmVhZHkgZXhwb3J0ZWQgb3IgYWJzZW50JykK" | base64 -d > /tmp/stat_hook.py
+          python3 /tmp/stat_hook.py
+          echo "[+] 校验："
+          grep -c "ksu_handle_newfstat_ret" fs/stat.c
+          grep -c "ksu_handle_fstat64_ret" fs/stat.c
+          grep -c "ksu_handle_sys_reboot" kernel/reboot.c
+          grep -c "sel_handle_status_ops" security/selinux/selinuxfs.c
+
+      - name: 🔊 Port afe_dsm/max98927 symbols (audio fix)
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+          echo "aW1wb3J0IHN5cwoKIyAxKSBhcHJfYXVkaW8tdjIuaDogRFNNIOW4uOmHjwpwID0gJ3RlY2hwYWNrL2F1ZGlvL2luY2x1ZGUvZHNwL2Fwcl9hdWRpby12Mi5oJwpzID0gb3BlbihwLCBlcnJvcnM9J3JlcGxhY2UnKS5yZWFkKCkKaWYgJ0FGRV9NT0RVTEVfRFNNX1JYJyBpbiBzOgogICAgcHJpbnQoJ1srXSBhcHJfYXVkaW8tdjIuaCBhbHJlYWR5IGhhcyBEU00gZGVmaW5lcycpCmVsc2U6CiAgICBibG9jayA9ICgKICAgICAgICAnXG4vKiB2MjE6IE9uZVBsdXMgRFNNIChtYXg5ODkzNykgY29uc3RhbnRzIC0gcG9ydGVkIGZyb20gY2xhc3NpZmllZC9hbmRyb2lkX2tlcm5lbF9vbmVwbHVzX3NtODE1MCAqL1xuJwogICAgICAgICcjZGVmaW5lIERTTV9UWF9QT1JUX0lEIEFGRV9QT1JUX0lEX1FVQVRFUk5BUllfTUkyU19UWFxuJwogICAgICAgICcjZGVmaW5lIERTTV9SWF9QT1JUX0lEIEFGRV9QT1JUX0lEX1FVQVRFUk5BUllfTUkyU19SWFxuJwogICAgICAgICcjZGVmaW5lIEFGRV9NT0RVTEVfRFNNX1RYIDB4MTAwMDEwNjhcbicKICAgICAgICAnI2RlZmluZSBBRkVfTU9EVUxFX0RTTV9SWCAweDEwMDAxMDYyXG4nCiAgICAgICAgJyNkZWZpbmUgQUZFX1BBUkFNX0lEX0RTTV9DRkcgMHgxMDAwMTA2NlxuJwogICAgICAgICcjZGVmaW5lIEFGRV9QQVJBTV9JRF9EU01fSU5GTyAweDEwMDAxMDY3XG4nCiAgICAgICAgJyNkZWZpbmUgQUZFX1BBUkFNX0lEX0NBTElCIDB4MTAwMDEwNjVcbicKICAgICkKICAgIHMgPSBzLnJzdHJpcCgpICsgJ1xuJyArIGJsb2NrCiAgICBvcGVuKHAsICd3Jykud3JpdGUocykKICAgIHByaW50KCdbK10gYXByX2F1ZGlvLXYyLmg6IERTTSBkZWZpbmVzIGFwcGVuZGVkJykKCiMgMikgcTZhZmUuYzogYWZlX2RzbSDlh73mlbAgKyBFWFBPUlRfU1lNQk9MCnAgPSAndGVjaHBhY2svYXVkaW8vZHNwL3E2YWZlLmMnCnMgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQppZiAnYWZlX2RzbV9nZXRfY2FsaWInIGluIHM6CiAgICBwcmludCgnWytdIHE2YWZlLmMgYWxyZWFkeSBwYXRjaGVkJykKZWxzZToKICAgIGxpbmVzID0gW10KICAgIGEgPSBsaW5lcy5hcHBlbmQKICAgIGEoJycpCiAgICBhKCcvKiA9PT09PSB2MjE6IE9uZVBsdXMgbWF4OTg5MzcgRFNNIHN1cHBvcnQgKHBvcnRlZCBmcm9tIGNsYXNzaWZpZWQvYW5kcm9pZF9rZXJuZWxfb25lcGx1c19zbTgxNTApID09PT09ICovJykKICAgIGEoJ3N0YXRpYyB1aW50OF90ICpxNmFmZV9kc21fcGF5bG9hZF9wdHI7JykKICAgIGEoJycpCiAgICBhKCdzdGF0aWMgaW50IGFmZV9kc21fZ2V0X3BhcmFtcyhpbnQgcG9ydCwgaW50IG1vZHVsZV9pZCwgaW50IHBhcmFtX2lkLCB1aW50OF90ICpwYXlsb2FkLCBpbnQgc2l6ZSknKQogICAgYSgneycpCiAgICBhKCdcdHN0cnVjdCBwYXJhbV9oZHJfdjMgcGFyYW1faGRyID0gezB9OycpCiAgICBhKCdcdGludCByZXQgPSAtRUlOVkFMOycpCiAgICBhKCcnKQogICAgYSgnXHRwYXJhbV9oZHIubW9kdWxlX2lkID0gbW9kdWxlX2lkOycpCiAgICBhKCdcdHBhcmFtX2hkci5pbnN0YW5jZV9pZCA9IElOU1RBTkNFX0lEXzA7JykKICAgIGEoJ1x0cGFyYW1faGRyLnBhcmFtX2lkID0gcGFyYW1faWQ7JykKICAgIGEoJ1x0cGFyYW1faGRyLnBhcmFtX3NpemUgPSBzaXplOycpCiAgICBhKCcnKQogICAgYSgnXHRxNmFmZV9kc21fcGF5bG9hZF9wdHIgPSBwYXlsb2FkIC0gKHNpemVvZihzdHJ1Y3QgcGFyYW1faGRyX3YzKSArIHNpemVvZih1aW50MzJfdCkpOycpCiAgICBhKCcnKQogICAgYSgnXHRyZXQgPSBxNmFmZV9nZXRfcGFyYW1zKHBvcnQsIE5VTEwsICZwYXJhbV9oZHIpOycpCiAgICBhKCdcdGlmIChyZXQpIHsnKQogICAgYSgnXHRcdHByX2VycigiJXM6IEZhaWxlZCB0byBnZXQgZHNtIGNmZyBkYXRhXFxuIiwgX19mdW5jX18pOycpCiAgICBhKCdcdFx0Z290byBkb25lOycpCiAgICBhKCdcdH0nKQogICAgYSgnXHRyZXQgPSAwOycpCiAgICBhKCdkb25lOicpCiAgICBhKCdcdHJldHVybiByZXQ7JykKICAgIGEoJ30nKQogICAgYSgnJykKICAgIGEoJ3N0YXRpYyBpbnQgYWZlX2RzbV9zZXRfcGFyYW1zKGludCBwb3J0LCBpbnQgbW9kdWxlX2lkLCBpbnQgcGFyYW1faWQsIHVpbnQ4X3QgKnBheWxvYWQsIGludCBzaXplKScpCiAgICBhKCd7JykKICAgIGEoJ1x0c3RydWN0IHBhcmFtX2hkcl92MyBwYXJhbV9pbmZvID0gezB9OycpCiAgICBhKCdcdGludCByZXQgPSAtRUlOVkFMOycpCiAgICBhKCcnKQogICAgYSgnXHRwYXJhbV9pbmZvLm1vZHVsZV9pZCA9IG1vZHVsZV9pZDsnKQogICAgYSgnXHRwYXJhbV9pbmZvLmluc3RhbmNlX2lkID0gSU5TVEFOQ0VfSURfMDsnKQogICAgYSgnXHRwYXJhbV9pbmZvLnBhcmFtX2lkID0gcGFyYW1faWQ7JykKICAgIGEoJ1x0cGFyYW1faW5mby5wYXJhbV9zaXplID0gc2l6ZTsnKQogICAgYSgnJykKICAgIGEoJ1x0cmV0ID0gcTZhZmVfcGFja19hbmRfc2V0X3BhcmFtX2luX2JhbmQocG9ydCwnKQogICAgYSgnXHRcdFx0XHRcdCAgICAgICBxNmF1ZGlvX2dldF9wb3J0X2luZGV4KHBvcnQpLCcpCiAgICBhKCdcdFx0XHRcdFx0ICAgICAgIHBhcmFtX2luZm8sIHBheWxvYWQpOycpCiAgICBhKCdcdGlmIChyZXQpIHsnKQogICAgYSgnXHRcdHByX2VycigiJXM6IEZhaWxlZCB0byBzZXQgc3BlYWtlciBjZmcgcGFyYW0sIGVyciAlZFxcbiIsIF9fZnVuY19fLCByZXQpOycpCiAgICBhKCdcdFx0Z290byBmYWlsX2NtZDsnKQogICAgYSgnXHR9JykKICAgIGEoJ1x0cmV0ID0gMDsnKQogICAgYSgnZmFpbF9jbWQ6JykKICAgIGEoJ1x0cHJfZGVidWcoIiVzOiBjb25maWcucGRhdGEucGFyYW1faWQgMHgleCBzdGF0dXMgJWRcXG4iLCBfX2Z1bmNfXywnKQogICAgYSgnXHRcdCBwYXJhbV9pbmZvLnBhcmFtX2lkLCByZXQpOycpCiAgICBhKCdcdHJldHVybiByZXQ7JykKICAgIGEoJ30nKQogICAgYSgnJykKICAgIGZvciBmbiwgYm9keSwgc3ltIGluIFsKICAgICAgICAoJ2FmZV9kc21fZ2V0X2NhbGliJywKICAgICAgICAgJ1x0cmV0dXJuIGFmZV9kc21fZ2V0X3BhcmFtcyhEU01fVFhfUE9SVF9JRCwgQUZFX01PRFVMRV9EU01fVFgsIEFGRV9QQVJBTV9JRF9DQUxJQiwgcGF5bG9hZCwgc2l6ZW9mKHVpbnQzMl90KSoxNCk7JywgVHJ1ZSksCiAgICAgICAgKCdhZmVfZHNtX3NldF9jYWxpYicsCiAgICAgICAgICdcdHJldHVybiBhZmVfZHNtX3NldF9wYXJhbXMoRFNNX1RYX1BPUlRfSUQsIEFGRV9NT0RVTEVfRFNNX1RYLCBBRkVfUEFSQU1fSURfQ0FMSUIsIHBheWxvYWQsIHNpemVvZih1aW50MzJfdCkqMyk7JywgVHJ1ZSksCiAgICAgICAgKCdhZmVfZHNtX3J4X2dldF9wYXJhbXMnLAogICAgICAgICAnXHRyZXR1cm4gYWZlX2RzbV9nZXRfcGFyYW1zKERTTV9SWF9QT1JUX0lELCBBRkVfTU9EVUxFX0RTTV9SWCwgQUZFX1BBUkFNX0lEX0RTTV9DRkcsIHBheWxvYWQsIHNpemUpOycsIFRydWUpLAogICAgICAgICgnYWZlX2RzbV9yeF9zZXRfcGFyYW1zJywKICAgICAgICAgJ1x0cmV0dXJuIGFmZV9kc21fc2V0X3BhcmFtcyhEU01fUlhfUE9SVF9JRCwgQUZFX01PRFVMRV9EU01fUlgsIEFGRV9QQVJBTV9JRF9EU01fQ0ZHLCBwYXlsb2FkLCBzaXplKTsnLCBUcnVlKSwKICAgICAgICAoJ2FmZV9kc21fc2V0X3N0YXR1cycsCiAgICAgICAgICdcdHJldHVybiBhZmVfZHNtX3NldF9wYXJhbXMoRFNNX1JYX1BPUlRfSUQsIEFGRV9NT0RVTEVfRFNNX1JYLCBBRkVfUEFSQU1fSURfRFNNX0lORk8sIChpbnQ4X3QqKXBheWxvYWQsIHNpemVvZih1aW50MzJfdCkqOCk7JywgVHJ1ZSksCiAgICBdOgogICAgICAgIGEoZidpbnQge2ZufSh1aW50OF90KiBwYXlsb2FkKScpCiAgICAgICAgYSgneycpCiAgICAgICAgYShib2R5KQogICAgICAgIGEoJ30nKQogICAgICAgIGEoZidFWFBPUlRfU1lNQk9MKHtmbn0pOycpCiAgICAgICAgYSgnJykKICAgICMgcHJlL3Bvc3QgY2FsaWIKICAgIGEoJ2ludCBhZmVfZHNtX3ByZV9jYWxpYih1aW50OF90KiBwYXlsb2FkKScpCiAgICBhKCd7JykKICAgIGEoJ1x0dWludDMyX3QgKnBhcmFtcyA9ICh1aW50MzJfdCAqKXBheWxvYWQ7JykKICAgIGEoJ1x0KihwYXJhbXMpXHRcdD0gMDsnKQogICAgYSgnXHQqKHBhcmFtcyArIDEpXHQ9IDE7JykKICAgIGEoJ1x0KihwYXJhbXMgKyAyKVx0PSAweDAzMDAwMDAxOycpCiAgICBhKCdcdCoocGFyYW1zICsgMylcdD0gNDsnKQogICAgYSgnJykKICAgIGEoJ1x0YWZlX2RzbV9yeF9zZXRfcGFyYW1zKHBheWxvYWQsIDQqc2l6ZW9mKHVpbnQzMl90KSk7JykKICAgIGEoJ1x0dXNsZWVwX3JhbmdlKDEwMDAqMTAwMCwgMTAwMCoxMDAwICsgMTApOycpCiAgICBhKCdcdHJldHVybiAwOycpCiAgICBhKCd9JykKICAgIGEoJ0VYUE9SVF9TWU1CT0woYWZlX2RzbV9wcmVfY2FsaWIpOycpCiAgICBhKCcnKQogICAgYSgnaW50IGFmZV9kc21fcG9zdF9jYWxpYih1aW50OF90KiBwYXlsb2FkKScpCiAgICBhKCd7JykKICAgIGEoJ1x0dWludDMyX3QgKnBhcmFtcyA9ICh1aW50MzJfdCAqKXBheWxvYWQ7JykKICAgIGEoJ1x0KihwYXJhbXMpXHRcdD0gMDsnKQogICAgYSgnXHQqKHBhcmFtcyArIDEpXHQ9IDE7JykKICAgIGEoJ1x0KihwYXJhbXMgKyAyKVx0PSAweDAzMDAwMDAxOycpCiAgICBhKCdcdCoocGFyYW1zICsgMylcdD0gMTsnKQogICAgYSgnXHRyZXR1cm4gYWZlX2RzbV9yeF9zZXRfcGFyYW1zKHBheWxvYWQsIDQqc2l6ZW9mKHVpbnQzMl90KSk7JykKICAgIGEoJ30nKQogICAgYSgnRVhQT1JUX1NZTUJPTChhZmVfZHNtX3Bvc3RfY2FsaWIpOycpCiAgICBhKCcnKQogICAgYSgnaW50IGFmZV9kc21fcmFtcF9kbl9jZmcodWludDhfdCAqcGF5bG9hZCwgdWludDMyX3QgZGVsYXlfaW5fbXMpJykKICAgIGEoJ3snKQogICAgYSgnXHRpbnQgcmV0OycpCiAgICBhKCdcdHVpbnQzMl90ICpwYXJhbXMgPSAodWludDMyX3QgKilwYXlsb2FkOycpCiAgICBhKCcnKQogICAgYSgnXHQqKHBhcmFtcylcdFx0PSAwOycpCiAgICBhKCdcdCoocGFyYW1zICsgMSlcdD0gMzsnKQogICAgYSgnXHQqKHBhcmFtcyArIDIpXHQ9IDB4MDMwMDAwNjM7JykKICAgIGEoJ1x0KihwYXJhbXMgKyAzKVx0PSA1OycpCiAgICBhKCdcdCoocGFyYW1zICsgNClcdD0gMHgwMzAwMDA2NDsnKQogICAgYSgnXHQqKHBhcmFtcyArIDUpXHQ9IDUwMDsnKQogICAgYSgnXHQqKHBhcmFtcyArIDYpXHQ9IDB4MDMwMDAwNjY7JykKICAgIGEoJ1x0KihwYXJhbXMgKyA3KVx0PSAxOycpCiAgICBhKCcnKQogICAgYSgnXHRyZXQgPSBhZmVfZHNtX3J4X3NldF9wYXJhbXMocGF5bG9hZCwgc2l6ZW9mKHVpbnQzMl90KSo4KTsnKQogICAgYSgnXHRpZiAocmV0KSB7JykKICAgIGEoJ1x0XHRwcl9lcnIoIiVzOiBGYWlsZWQgdG8gc2V0IHNwZWFrZXIgcmFtcCBkdXJhdGlvbiBwYXJhbSwgZXJyICVkXFxuIiwgX19mdW5jX18sIHJldCk7JykKICAgIGEoJ1x0XHRnb3RvIGZhaWxfY21kOycpCiAgICBhKCdcdH0nKQogICAgYSgnXHR1c2xlZXBfcmFuZ2UoZGVsYXlfaW5fbXMqMTAwMCwgZGVsYXlfaW5fbXMqMTAwMCArIDEwKTsnKQogICAgYSgnXHRyZXQgPSAwOycpCiAgICBhKCdmYWlsX2NtZDonKQogICAgYSgnXHRwcl9kZWJ1ZygiJXM6IHN0YXR1cyAlZFxcbiIsIF9fZnVuY19fLCByZXQpOycpCiAgICBhKCdcdHJldHVybiByZXQ7JykKICAgIGEoJ30nKQogICAgYSgnRVhQT1JUX1NZTUJPTChhZmVfZHNtX3JhbXBfZG5fY2ZnKTsnKQogICAgYSgnJykKICAgIHMgPSBzLnJzdHJpcCgpICsgJ1xuJyArICdcbicuam9pbihsaW5lcykKICAgIG9wZW4ocCwgJ3cnKS53cml0ZShzKQogICAgcHJpbnQoJ1srXSBxNmFmZS5jOiBhZmVfZHNtIGZ1bmN0aW9ucyBhcHBlbmRlZCcpCgojIDMpIHBtODAwOCBzdHViCnAgPSAnZHJpdmVycy9yZWd1bGF0b3IvcWNvbV9wbTgwMDgtcmVndWxhdG9yLmMnCnMgPSBvcGVuKHAsIGVycm9ycz0ncmVwbGFjZScpLnJlYWQoKQppZiAncmVzZXRfcG04MDA4X21heDk4OTI3JyBpbiBzOgogICAgcHJpbnQoJ1srXSBwbTgwMDggYWxyZWFkeSBwYXRjaGVkJykKZWxzZToKICAgIGJsb2NrID0gKAogICAgICAgICdcbi8qIHYyMTogc3R1YiBmb3IgdmVuZG9yIG1heDk4OTM3X2Rsa20gKGZ1bGwgcmVzZXQgbmVlZHMgR1BJTy9yZXByb2JlIGNoYWluIG5vdCBwcmVzZW50IGluIExPUyB0cmVlKSAqL1xuJwogICAgICAgICd2b2lkIHJlc2V0X3BtODAwOF9tYXg5ODkyNyh2b2lkKVxuJwogICAgICAgICd7XG4nCiAgICAgICAgJ1x0cHJfaW5mbygiJXM6IHN0dWIgY2FsbGVkIChMT1MgdHJlZSBsYWNrcyBmdWxsIHBtODAwOCByZXNldCBjaGFpbilcXG4iLCBfX2Z1bmNfXyk7XG4nCiAgICAgICAgJ31cbicKICAgICAgICAnRVhQT1JUX1NZTUJPTChyZXNldF9wbTgwMDhfbWF4OTg5MjcpO1xuJwogICAgKQogICAgcyA9IHMucnN0cmlwKCkgKyAnXG4nICsgYmxvY2sKICAgIG9wZW4ocCwgJ3cnKS53cml0ZShzKQogICAgcHJpbnQoJ1srXSBwbTgwMDg6IHJlc2V0IHN0dWIgYXBwZW5kZWQnKQo=" | base64 -d > /tmp/audio_port.py
+          python3 /tmp/audio_port.py
+          echo "[+] 校验："
+          grep -c "EXPORT_SYMBOL(afe_dsm" techpack/audio/dsp/q6afe.c
+          grep -c "reset_pm8008_max98927" drivers/regulator/qcom_pm8008-regulator.c
+          grep -c "AFE_MODULE_DSM_RX" techpack/audio/include/dsp/apr_audio-v2.h
+
+      - name: 🚀 Build Process
+        uses: ./.github/workflows/build-process
+
+      - name: 💉 Inject KSU-Next ksud into AK3
+        shell: bash
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel/AnyKernel3
+          echo "[+] 当前目录内容："; ls
+          curl -LSs --retry 3 -o ksud "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.1/ksud-aarch64-linux-android"
+          chmod 755 ksud
+          file ksud 2>/dev/null | head -1 || true
+          cat >> anykernel.sh <<'KSUEOF'
+
+          # --- v13: KSU-Next userspace bootstrap -----------------------------
+          install_ksud() {
+            KSUD_SRC="$PWD/ksud"
+            if [ ! -f "$KSUD_SRC" ]; then ui_print "[-] ksud missing in zip"; return 0; fi
+            if [ ! -d /data ]; then mount /data >/dev/null 2>&1 || true; fi
+            if [ ! -d /data/adb ]; then
+              for BD in /dev/block/by-name/userdata /dev/block/bootdevice/by-name/userdata; do
+                if [ -b "$BD" ]; then mkdir -p /data; mount -t ext4 "$BD" /data >/dev/null 2>&1 && break; fi
+              done
+            fi
+            mkdir -p /data/adb 2>/dev/null
+            if cp -f "$KSUD_SRC" /data/adb/ksud 2>/dev/null; then
+              chmod 0755 /data/adb/ksud
+              chown 0:0 /data/adb/ksud 2>/dev/null || true
+              chcon u:object_r:adb_data_file:s0 /data/adb/ksud 2>/dev/null || true
+              sync
+              ui_print "[+] ksud installed -> /data/adb/ksud"
+            else
+              ui_print "[-] /data not writable - ksud NOT installed (root will not work)"
+            fi
+          }
+          install_ksud
+          unset -f install_ksud
+          KSUEOF
+          echo "[+] anykernel.sh 尾部："; tail -6 anykernel.sh
+
+      - name: 🔩 Pack Process
+        uses: ./.github/workflows/pack-process
+
+      - name: ✏️ Upload Artifacts
+        uses: ./.github/workflows/upload-files
