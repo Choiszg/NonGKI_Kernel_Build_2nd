@@ -510,16 +510,16 @@ jobs:
       - name: 🧬 Rebuild Image-dtb with guacamole dtb
         shell: bash
         run: |
-          cd $GITHUB_WORKSPACE/device_kernel/out/arch/arm64/boot
-          ls -la Image Image-dtb 2>/dev/null || true
-          DTB=dts/18821/sm8150-mtp-overlay.dtb
-          if [ ! -f "$DTB" ]; then echo "[-] guacamole dtb 未生成!"; find . -name "*mtp-overlay*" 2>/dev/null; exit 1; fi
-          ls -la $DTB
-          cat Image $DTB > Image-dtb
+          cd $GITHUB_WORKSPACE/device_kernel
+          DTB_REL=18821/sm8150-mtp-overlay.dtb
+          make -j$(nproc --all) CC="ccache clang" ${{ env.CUSTOM_CMDS }} ${{ env.EXTRA_CMDS }} O=out ARCH=${{ env.KERNEL_ARCH }} $DTB_REL 2>&1 | tail -5 || make -j$(nproc --all) O=out ARCH=${{ env.KERNEL_ARCH }} $DTB_REL 2>&1 | tail -5
+          if [ ! -f out/arch/arm64/boot/dts/$DTB_REL ]; then echo "[-] dtb 未生成"; exit 1; fi
+          ls -la out/arch/arm64/boot/dts/$DTB_REL
+          echo "[+] dtb 中 guacamole 标识计数:"
+          grep -c guacamole out/arch/arm64/boot/dts/$DTB_REL || true
+          cat out/arch/arm64/boot/Image out/arch/arm64/boot/dts/$DTB_REL > out/arch/arm64/boot/Image-dtb
           echo "[+] Image-dtb 重建完成:"
-          ls -la Image-dtb
-          echo "[+] 校验 dtb 中 guacamole 标识:"
-          grep -c guacamole $DTB || echo 0
+          ls -la out/arch/arm64/boot/Image-dtb
 
       - name: 🔩 Pack Process
         uses: ./.github/workflows/pack-process
